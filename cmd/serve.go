@@ -19,21 +19,32 @@ import (
 )
 
 // NewServeCmd returns the `serve` subcommand — a long-running HTTP listener
-// that accepts Fleet automation webhooks (host status, failing policies,
-// vulnerabilities) and reconciles affected hosts into Snipe-IT in near-real-time.
+// that accepts Fleet's activities webhook and reconciles the affected host
+// into Snipe-IT in near-real-time. This is the only Fleet webhook that emits
+// inventory-relevant events (enrollment, team transfer, MDM state, deletion).
 func NewServeCmd() *cobra.Command {
 	c := &cobra.Command{
 		Use:   "serve",
-		Short: "Run as an HTTP webhook listener for Fleet automations",
-		Long: `Starts an HTTP server that accepts Fleet automation webhooks and reconciles affected hosts into Snipe-IT.
+		Short: "Listen for Fleet activities webhooks and update Snipe-IT",
+		Long: `Starts an HTTP server that receives Fleet's activities webhook (Settings → Integrations → Automations → Activities) and reconciles inventory-relevant events into Snipe-IT.
 
-Configure Fleet automations to POST to <addr><path> (default ":9090/webhook/fleet"). Supported payload shapes:
-  - Host status webhook ({"hosts": [{...}]})
-  - Failing policies webhook ({"failing_policies": [...]})
-  - Vulnerabilities webhook
-For each host referenced in the payload, fleet2snipe fetches the latest detail via the Fleet API and syncs it.
+Inventory-relevant activity types handled:
+  enrolled_host          — new host showed up in Fleet → create/update in Snipe-IT
+  refetched_host         — manual refetch → re-sync fresh detail
+  mdm_enrolled           — MDM enrollment state changed → re-sync
+  mdm_unenrolled         — MDM unenrollment → re-sync
+  transferred_hosts      — host moved between teams → re-sync (multiple hosts)
+  deleted_host           — host removed from Fleet → logged (Snipe-IT asset is left in place)
+  deleted_multiple_hosts — bulk delete → logged
 
-A POST to <path> from any source must include the configured shared secret in the X-Fleet2Snipe-Secret header (or ?secret= query string). GET <path>/healthz returns 200 OK.`,
+All other activity types are accepted and silently ignored.
+
+For "every host updated" semantics (detail_updated_at changes), run the sync
+subcommand on a cron — Fleet does not emit per-update webhooks.
+
+Configure Fleet to POST to <addr><path> (default ":9090/webhook/fleet"). Auth:
+the configured shared secret is accepted in the X-Fleet2Snipe-Secret header or
+the ?secret= query string. GET <path>/healthz returns 200 OK.`,
 		RunE: runServe,
 	}
 	c.Flags().String("addr", "", "Listen address (overrides webhook.addr in config)")
@@ -83,7 +94,7 @@ func runServe(cmd *cobra.Command, _ []string) error {
 	}
 
 	mux := http.NewServeMux()
-	h := &webhookHandler{
+	h := &activitiesHandler{
 		engine: engine,
 		fleet:  fleetClient,
 		secret: Cfg.Webhook.Secret,
@@ -103,7 +114,7 @@ func runServe(cmd *cobra.Command, _ []string) error {
 		IdleTimeout:       120 * time.Second,
 	}
 
-	log.Infof("fleet2snipe webhook server listening on %s%s", addr, path)
+	log.Infof("fleet2snipe activities listener on %s%s", addr, path)
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, c := context.WithTimeout(context.Background(), 15*time.Second)
@@ -117,42 +128,38 @@ func runServe(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
-// webhookHandler serves POSTs from Fleet's automation system.
-type webhookHandler struct {
+// activitiesHandler dispatches Fleet activities to single-host syncs.
+type activitiesHandler struct {
 	engine *f2sync.Engine
 	fleet  *fleetapi.Client
 	secret string
 }
 
-// Fleet's webhook payloads vary by automation type. We accept the union of
-// shapes and pull out anything that looks like a host identifier.
-type fleetWebhookPayload struct {
-	Timestamp string `json:"timestamp"`
-	// Host status webhook
-	Hosts []struct {
-		ID             uint   `json:"id"`
-		Hostname       string `json:"hostname"`
-		DisplayName    string `json:"display_name"`
-		HardwareSerial string `json:"hardware_serial"`
-	} `json:"hosts"`
-	// Failing-policy webhook
-	FailingPolicies []struct {
-		PolicyID uint `json:"policy_id"`
-		Hosts    []struct {
-			ID             uint   `json:"id"`
-			Hostname       string `json:"hostname"`
-			HardwareSerial string `json:"hardware_serial"`
-		} `json:"hosts"`
-	} `json:"failing_policies"`
-	// Vulnerability webhook — Fleet sends host IDs/serials under "hosts_affected".
-	HostsAffected []struct {
-		ID             uint   `json:"id"`
-		Hostname       string `json:"hostname"`
-		HardwareSerial string `json:"hardware_serial"`
-	} `json:"hosts_affected"`
+// activity is one entry from the Fleet activity feed. Only the fields we
+// dispatch on are decoded explicitly; the rest live in Details for type-specific
+// lookup. Fleet's wire format for the activities webhook posts an envelope with
+// {"activities": [...]} but we also accept a bare array or a single object.
+type activity struct {
+	ID            uint64          `json:"id"`
+	CreatedAt     string          `json:"created_at"`
+	ActorFullName string          `json:"actor_full_name"`
+	Type          string          `json:"type"`
+	Details       json.RawMessage `json:"details"`
 }
 
-func (h *webhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+// Common detail shapes — Fleet uses different field names per activity type.
+type singleHostDetails struct {
+	HostID          uint   `json:"host_id"`
+	HostSerial      string `json:"host_serial"`
+	HostDisplayName string `json:"host_display_name"`
+}
+
+type multiHostDetails struct {
+	HostIDs   []uint   `json:"host_ids"`
+	HostNames []string `json:"host_display_names"`
+}
+
+func (h *activitiesHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -169,42 +176,123 @@ func (h *webhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var p fleetWebhookPayload
-	if err := json.Unmarshal(body, &p); err != nil {
-		log.WithError(err).Warn("could not parse webhook payload")
+	activities, err := parseActivities(body)
+	if err != nil {
+		log.WithError(err).Warn("could not parse activities payload")
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
-
-	hostIDs := collectHostIDs(p)
-	if len(hostIDs) == 0 {
-		log.Warn("webhook payload had no host references")
+	if len(activities) == 0 {
+		log.Debug("activities payload contained no events")
 		w.WriteHeader(http.StatusAccepted)
 		_, _ = w.Write([]byte(`{"status":"no-op"}`))
 		return
 	}
 
-	// Sync each referenced host. Use the request context so SIGTERM aborts.
-	ctx := r.Context()
-	for _, id := range hostIDs {
-		host, err := h.fleet.GetHost(ctx, id)
-		if err != nil {
-			log.WithError(err).WithField("host_id", id).Error("could not fetch host")
+	processed := 0
+	ignored := 0
+	for _, a := range activities {
+		ids := hostIDsFor(a)
+		if len(ids) == 0 {
+			ignored++
+			log.WithField("type", a.Type).Debug("activity has no inventory impact, ignoring")
 			continue
 		}
-		if err := h.engine.SyncHost(ctx, *host); err != nil {
-			log.WithError(err).WithField("host_id", id).Error("could not sync host")
+		for _, id := range ids {
+			if err := h.dispatch(r.Context(), a, id); err != nil {
+				log.WithError(err).WithFields(logrus.Fields{"type": a.Type, "host_id": id}).Error("dispatch failed")
+				continue
+			}
+			processed++
 		}
 	}
 
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_, _ = fmt.Fprintf(w, `{"status":"ok","hosts_processed":%d}`, len(hostIDs))
+	_, _ = fmt.Fprintf(w, `{"status":"ok","processed":%d,"ignored":%d}`, processed, ignored)
+}
+
+// dispatch handles one activity for one host. Most types trigger a re-sync of
+// the host via the Fleet detail endpoint; deletion types just log so an
+// operator can retire the asset manually (we deliberately don't auto-delete).
+func (h *activitiesHandler) dispatch(ctx context.Context, a activity, hostID uint) error {
+	switch a.Type {
+	case "deleted_host", "deleted_multiple_hosts":
+		log.WithFields(logrus.Fields{"type": a.Type, "host_id": hostID}).Warn("host deleted in Fleet — Snipe-IT asset left in place (retire manually if needed)")
+		return nil
+	}
+
+	host, err := h.fleet.GetHost(ctx, hostID)
+	if err != nil {
+		if errors.Is(err, fleetapi.ErrNotFound) {
+			log.WithField("host_id", hostID).Info("host no longer in Fleet, skipping")
+			return nil
+		}
+		return fmt.Errorf("fetching host %d: %w", hostID, err)
+	}
+	return h.engine.SyncHost(ctx, *host)
+}
+
+// parseActivities decodes the Fleet activities webhook payload. Fleet has used
+// both an enveloped form ({"activities": [...]}) and a bare array depending on
+// version; we accept either, plus a single object for defensive flexibility.
+func parseActivities(body []byte) ([]activity, error) {
+	trimmed := strings.TrimSpace(string(body))
+	if trimmed == "" {
+		return nil, nil
+	}
+	switch trimmed[0] {
+	case '[':
+		var arr []activity
+		if err := json.Unmarshal(body, &arr); err != nil {
+			return nil, err
+		}
+		return arr, nil
+	case '{':
+		var env struct {
+			Activities []activity `json:"activities"`
+		}
+		if err := json.Unmarshal(body, &env); err == nil && len(env.Activities) > 0 {
+			return env.Activities, nil
+		}
+		// Single activity object?
+		var single activity
+		if err := json.Unmarshal(body, &single); err != nil {
+			return nil, err
+		}
+		if single.Type == "" {
+			return nil, nil
+		}
+		return []activity{single}, nil
+	default:
+		return nil, fmt.Errorf("unexpected payload start: %q", trimmed[:1])
+	}
+}
+
+// hostIDsFor returns the host IDs an activity should trigger a re-sync for.
+// Returns an empty slice for activity types that don't affect Snipe-IT inventory.
+func hostIDsFor(a activity) []uint {
+	switch a.Type {
+	case "enrolled_host", "refetched_host", "mdm_enrolled", "mdm_unenrolled", "deleted_host":
+		var d singleHostDetails
+		if err := json.Unmarshal(a.Details, &d); err != nil || d.HostID == 0 {
+			return nil
+		}
+		return []uint{d.HostID}
+	case "transferred_hosts", "deleted_multiple_hosts":
+		var d multiHostDetails
+		if err := json.Unmarshal(a.Details, &d); err != nil {
+			return nil
+		}
+		return d.HostIDs
+	}
+	return nil
 }
 
 // authorize compares the configured shared secret to the request's header or
 // query parameter using constant-time comparison. When secret is empty, all
-// requests are allowed (with a warning logged at startup).
-func (h *webhookHandler) authorize(r *http.Request) bool {
+// requests are allowed (with a startup warning).
+func (h *activitiesHandler) authorize(r *http.Request) bool {
 	if h.secret == "" {
 		return true
 	}
@@ -213,33 +301,6 @@ func (h *webhookHandler) authorize(r *http.Request) bool {
 		candidate = r.URL.Query().Get("secret")
 	}
 	return subtle.ConstantTimeCompare([]byte(candidate), []byte(h.secret)) == 1
-}
-
-// collectHostIDs dedupes the host IDs referenced anywhere in the payload.
-func collectHostIDs(p fleetWebhookPayload) []uint {
-	seen := make(map[uint]struct{})
-	for _, h := range p.Hosts {
-		if h.ID != 0 {
-			seen[h.ID] = struct{}{}
-		}
-	}
-	for _, fp := range p.FailingPolicies {
-		for _, h := range fp.Hosts {
-			if h.ID != 0 {
-				seen[h.ID] = struct{}{}
-			}
-		}
-	}
-	for _, h := range p.HostsAffected {
-		if h.ID != 0 {
-			seen[h.ID] = struct{}{}
-		}
-	}
-	out := make([]uint, 0, len(seen))
-	for id := range seen {
-		out = append(out, id)
-	}
-	return out
 }
 
 // accessLog wraps a handler with structured access logging.

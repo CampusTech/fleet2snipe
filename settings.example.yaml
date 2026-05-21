@@ -65,8 +65,12 @@ sync:
   #   _snipeit_fleet_mdm_enrollment_3: mdm.enrollment_status
 
 webhook:
+  # `serve` listens for Fleet's activities webhook here.
+  # Configure under Fleet Settings → Integrations → Automations → Activities.
   addr: ":9090"
   path: /webhook/fleet
   # secret is checked against X-Fleet2Snipe-Secret header or ?secret= query.
+  # Fleet's automation UI doesn't support custom headers — use the query string:
+  #   https://your-host/webhook/fleet?secret=<this-value>
   # Generate with: openssl rand -hex 32
   secret: ""

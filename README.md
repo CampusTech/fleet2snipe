@@ -35,9 +35,18 @@ $EDITOR settings.yaml          # fill in fleet/snipe credentials + IDs
 ./fleet2snipe serve --verbose
 ```
 
-Then in Fleet, set up automations (Settings → Integrations → Automations) pointing at `http(s)://<your-host>:9090/webhook/fleet`. Supply the shared secret via the `X-Fleet2Snipe-Secret` header (Fleet supports custom headers) or as a `?secret=…` query parameter.
+In Fleet, go to **Settings → Integrations → Automations** and enable the **Activities** webhook pointing at `http(s)://<your-host>:9090/webhook/fleet?secret=<your-secret>`. (Fleet's other webhooks — host status, failing policies, vulnerabilities — fire on operational events, not inventory changes, so we ignore them.)
 
-`fleet2snipe` parses three Fleet payload shapes today: host-status, failing-policies, and vulnerabilities. For each host referenced, it fetches the latest detail via `/api/v1/fleet/hosts/{id}` and reconciles into Snipe-IT.
+The activities webhook is the only Fleet webhook that emits inventory-relevant events. fleet2snipe re-syncs the affected host on:
+
+- `enrolled_host` — new host showed up in Fleet
+- `refetched_host` — manual refetch triggered
+- `mdm_enrolled` / `mdm_unenrolled` — MDM state changed
+- `transferred_hosts` — host moved between teams
+
+`deleted_host` / `deleted_multiple_hosts` are logged but the Snipe-IT asset is left in place (retire manually).
+
+> **Fleet does not emit per-update webhooks.** Detail changes (OS upgrades, free-disk-space deltas, new IPs) only land in Fleet when osquery re-reports — there's no event for that. Run `fleet2snipe sync` on a cron (every 15 min is typical) as your authoritative reconciliation loop, with `serve` providing the near-real-time enrollment path.
 
 ## Authentication setup
 
