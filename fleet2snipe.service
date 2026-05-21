@@ -1,0 +1,23 @@
+[Unit]
+Description=fleet2snipe webhook listener
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=fleet2snipe
+Group=fleet2snipe
+WorkingDirectory=/opt/fleet2snipe
+EnvironmentFile=-/etc/fleet2snipe.env
+ExecStart=/usr/local/bin/fleet2snipe --config /etc/fleet2snipe/settings.yaml serve --verbose
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ReadOnlyPaths=/etc/fleet2snipe
+
+[Install]
+WantedBy=multi-user.target

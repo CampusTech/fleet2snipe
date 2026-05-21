@@ -1,0 +1,9 @@
+/fleet2snipe
+/dist/
+/.cache/
+/settings.yaml
+*.log
+.idea/
+.vscode/
+.claude/
+.DS_Store

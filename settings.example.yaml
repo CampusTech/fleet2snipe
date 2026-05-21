@@ -1,0 +1,72 @@
+# fleet2snipe configuration
+#
+# Copy to settings.yaml and fill in your values, or set the equivalent env vars:
+#   FLEET_URL, FLEET_TOKEN, SNIPE_URL, SNIPE_API_KEY, FLEET2SNIPE_WEBHOOK_SECRET
+
+fleet:
+  url: https://fleet.example.com
+  # Create an api_only user in Fleet and paste their token here.
+  # Settings → Users → Create user → check "API only"
+  token: ""
+  # team_id: 1            # optional Premium-only team filter
+  insecure_tls: false
+  per_page: 1000          # max 10000
+  populate_software: false  # set true if you map software fields (heavier)
+  populate_labels: false
+  populate_users: false
+
+snipe_it:
+  url: https://snipe.example.com
+  api_key: ""
+  default_status_id: 2      # status assigned to newly created assets
+
+  # Snipe-IT fieldset to attach to auto-created models. Required by `setup`.
+  # Create one in Snipe-IT first, then put its ID here.
+  custom_fieldset_id: 0
+
+  # Optional: pre-existing manufacturer IDs keyed by Fleet's hardware_vendor
+  # string (lowercased). Vendors not listed here are auto-created on sync.
+  manufacturer_ids:
+    apple inc.: 0
+    dell inc.: 0
+    "lenovo": 0
+    "hp": 0
+
+  # Map a Fleet platform string to a Snipe-IT category for newly created models.
+  # Used by `sync` when the model doesn't yet exist in Snipe-IT.
+  category_ids:
+    darwin: 0
+    windows: 0
+    linux: 0
+    chrome: 0
+    ios: 0
+    ipados: 0
+
+  # Fallback category when no platform-specific id is set.
+  default_category_id: 0
+
+sync:
+  dry_run: false
+  force: false
+  rate_limit: true
+  update_only: false
+  use_cache: false
+  cache_dir: .cache
+  set_name: true            # sync hostname/computer_name into Snipe-IT name field
+  asset_tag_prefix: "fleet-"
+  # platform_filter: ["darwin", "windows"]  # only sync these platforms
+
+  # Field mappings: Snipe-IT custom field db_column_name -> gjson path into the
+  # Fleet host JSON. Run `fleet2snipe setup` once to auto-populate this list.
+  # Example after setup:
+  # field_mapping:
+  #   _snipeit_fleet_host_id_1: id
+  #   _snipeit_fleet_os_version_2: os_version
+  #   _snipeit_fleet_mdm_enrollment_3: mdm.enrollment_status
+
+webhook:
+  addr: ":9090"
+  path: /webhook/fleet
+  # secret is checked against X-Fleet2Snipe-Secret header or ?secret= query.
+  # Generate with: openssl rand -hex 32
+  secret: ""
