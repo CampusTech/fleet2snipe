@@ -37,16 +37,15 @@ $EDITOR settings.yaml          # fill in fleet/snipe credentials + IDs
 
 In Fleet, go to **Settings → Integrations → Automations** and enable the **Activities** webhook pointing at `http(s)://<your-host>:9090/webhook/fleet?secret=<your-secret>`. (Fleet's other webhooks — host status, failing policies, vulnerabilities — fire on operational events, not inventory changes, so we ignore them.)
 
-The activities webhook is the only Fleet webhook that emits inventory-relevant events. fleet2snipe re-syncs the affected host on:
+The activity payload itself is treated as a **wake-up signal**. fleet2snipe extracts every `host_id` referenced anywhere in the batch, dedupes them, then `GET`s the full host detail from Fleet for each one and reconciles into Snipe-IT. This means:
 
-- `enrolled_host` — new host showed up in Fleet
-- `refetched_host` — manual refetch triggered
-- `mdm_enrolled` / `mdm_unenrolled` — MDM state changed
-- `transferred_hosts` — host moved between teams
+- We don't maintain a type allowlist — any current or future Fleet activity that names a host will trigger a refresh.
+- A burst of activities for the same host (enrolled + MDM enrolled + software installed landing together) results in **one** Fleet API call and one Snipe-IT update.
+- The 404 case (host was deleted between activity firing and our pull) is handled silently.
 
-`deleted_host` / `deleted_multiple_hosts` are logged but the Snipe-IT asset is left in place (retire manually).
+`deleted_host` / `deleted_multiple_hosts` are the only special case: we log the event but leave the Snipe-IT asset in place (retire manually).
 
-> **Fleet does not emit per-update webhooks.** Detail changes (OS upgrades, free-disk-space deltas, new IPs) only land in Fleet when osquery re-reports — there's no event for that. Run `fleet2snipe sync` on a cron (every 15 min is typical) as your authoritative reconciliation loop, with `serve` providing the near-real-time enrollment path.
+> **Fleet does not emit per-update webhooks.** Detail changes (OS upgrades, free-disk-space deltas, new IPs) only land in Fleet when osquery re-reports — there's no event for that. Run `fleet2snipe sync` on a cron (every 15 min is typical) as your authoritative reconciliation loop, with `serve` providing the near-real-time path for anything Fleet actually audit-logs.
 
 ## Authentication setup
 

@@ -18,29 +18,21 @@ import (
 	f2sync "github.com/CampusTech/fleet2snipe/sync"
 )
 
-// NewServeCmd returns the `serve` subcommand — a long-running HTTP listener
-// that accepts Fleet's activities webhook and reconciles the affected host
-// into Snipe-IT in near-real-time. This is the only Fleet webhook that emits
-// inventory-relevant events (enrollment, team transfer, MDM state, deletion).
+// NewServeCmd returns the `serve` subcommand — an HTTP listener that treats
+// Fleet's activities webhook as a wake-up signal. The payload itself is
+// ignored beyond extracting host IDs; for each unique host referenced, we GET
+// the full host detail from Fleet and reconcile it into Snipe-IT.
 func NewServeCmd() *cobra.Command {
 	c := &cobra.Command{
 		Use:   "serve",
-		Short: "Listen for Fleet activities webhooks and update Snipe-IT",
-		Long: `Starts an HTTP server that receives Fleet's activities webhook (Settings → Integrations → Automations → Activities) and reconciles inventory-relevant events into Snipe-IT.
+		Short: "Listen for Fleet activities webhooks and pull fresh host detail",
+		Long: `Starts an HTTP server that receives Fleet's activities webhook (Settings → Integrations → Automations → Activities) and uses each event as a wake-up signal to fetch fresh host detail from Fleet's API.
 
-Inventory-relevant activity types handled:
-  enrolled_host          — new host showed up in Fleet → create/update in Snipe-IT
-  refetched_host         — manual refetch → re-sync fresh detail
-  mdm_enrolled           — MDM enrollment state changed → re-sync
-  mdm_unenrolled         — MDM unenrollment → re-sync
-  transferred_hosts      — host moved between teams → re-sync (multiple hosts)
-  deleted_host           — host removed from Fleet → logged (Snipe-IT asset is left in place)
-  deleted_multiple_hosts — bulk delete → logged
+The activity type doesn't drive the data — we just dedupe the host IDs the payload references and pull each one via GET /api/v1/fleet/hosts/{id}, then push into Snipe-IT. This way we automatically benefit from any future Fleet activity type that names a host, without needing to maintain a type allowlist.
 
-All other activity types are accepted and silently ignored.
+Deletions (deleted_host / deleted_multiple_hosts) are the only special case: the host is gone from Fleet so we log the event but leave the Snipe-IT asset in place (retire manually).
 
-For "every host updated" semantics (detail_updated_at changes), run the sync
-subcommand on a cron — Fleet does not emit per-update webhooks.
+Detail drift that osquery surfaces between activity events (free disk space, IP changes, OS minor version) is NOT visible here — Fleet emits no event for it. Run "fleet2snipe sync" on a cron (every 15 min is typical) as your authoritative reconciliation loop.
 
 Configure Fleet to POST to <addr><path> (default ":9090/webhook/fleet"). Auth:
 the configured shared secret is accepted in the X-Fleet2Snipe-Secret header or
@@ -135,10 +127,9 @@ type activitiesHandler struct {
 	secret string
 }
 
-// activity is one entry from the Fleet activity feed. Only the fields we
-// dispatch on are decoded explicitly; the rest live in Details for type-specific
-// lookup. Fleet's wire format for the activities webhook posts an envelope with
-// {"activities": [...]} but we also accept a bare array or a single object.
+// activity is one entry from the Fleet activity feed. Fleet's wire format for
+// the activities webhook posts an envelope with {"activities": [...]} but we
+// also accept a bare array or a single object for resilience across versions.
 type activity struct {
 	ID            uint64          `json:"id"`
 	CreatedAt     string          `json:"created_at"`
@@ -147,16 +138,19 @@ type activity struct {
 	Details       json.RawMessage `json:"details"`
 }
 
-// Common detail shapes — Fleet uses different field names per activity type.
-type singleHostDetails struct {
-	HostID          uint   `json:"host_id"`
-	HostSerial      string `json:"host_serial"`
-	HostDisplayName string `json:"host_display_name"`
+// deletionTypes are activity types where the host no longer exists in Fleet, so
+// pulling its detail will 404. We log and skip rather than treating as an error.
+var deletionTypes = map[string]bool{
+	"deleted_host":           true,
+	"deleted_multiple_hosts": true,
 }
 
-type multiHostDetails struct {
-	HostIDs   []uint   `json:"host_ids"`
-	HostNames []string `json:"host_display_names"`
+// activityDetails is a permissive shape that captures host references regardless
+// of the specific activity type. Fleet uses host_id (single) for most events
+// and host_ids (plural) for bulk operations like transferred_hosts.
+type activityDetails struct {
+	HostID  uint   `json:"host_id"`
+	HostIDs []uint `json:"host_ids"`
 }
 
 func (h *activitiesHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -189,39 +183,53 @@ func (h *activitiesHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	processed := 0
-	ignored := 0
+	// Collect unique host IDs across the payload. We dedupe so a burst of
+	// activities for the same host (e.g. enrolled + mdm_enrolled + installed_software
+	// landing together) results in a single API pull.
+	hosts := make(map[uint]string) // host_id -> latest activity type seen, for logging
+	deleted := 0
 	for _, a := range activities {
-		ids := hostIDsFor(a)
-		if len(ids) == 0 {
-			ignored++
-			log.WithField("type", a.Type).Debug("activity has no inventory impact, ignoring")
+		var d activityDetails
+		if len(a.Details) == 0 || json.Unmarshal(a.Details, &d) != nil {
 			continue
 		}
-		for _, id := range ids {
-			if err := h.dispatch(r.Context(), a, id); err != nil {
-				log.WithError(err).WithFields(logrus.Fields{"type": a.Type, "host_id": id}).Error("dispatch failed")
-				continue
+		if deletionTypes[a.Type] {
+			ids := d.HostIDs
+			if d.HostID != 0 {
+				ids = append(ids, d.HostID)
 			}
-			processed++
+			for _, id := range ids {
+				log.WithFields(logrus.Fields{"type": a.Type, "host_id": id}).Warn("host deleted in Fleet — Snipe-IT asset left in place (retire manually if needed)")
+				deleted++
+			}
+			continue
 		}
+		if d.HostID != 0 {
+			hosts[d.HostID] = a.Type
+		}
+		for _, id := range d.HostIDs {
+			hosts[id] = a.Type
+		}
+	}
+
+	processed := 0
+	for id, atype := range hosts {
+		if err := h.refresh(r.Context(), id); err != nil {
+			log.WithError(err).WithFields(logrus.Fields{"trigger": atype, "host_id": id}).Error("refresh failed")
+			continue
+		}
+		processed++
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_, _ = fmt.Fprintf(w, `{"status":"ok","processed":%d,"ignored":%d}`, processed, ignored)
+	_, _ = fmt.Fprintf(w, `{"status":"ok","activities":%d,"hosts_refreshed":%d,"hosts_deleted":%d}`, len(activities), processed, deleted)
 }
 
-// dispatch handles one activity for one host. Most types trigger a re-sync of
-// the host via the Fleet detail endpoint; deletion types just log so an
-// operator can retire the asset manually (we deliberately don't auto-delete).
-func (h *activitiesHandler) dispatch(ctx context.Context, a activity, hostID uint) error {
-	switch a.Type {
-	case "deleted_host", "deleted_multiple_hosts":
-		log.WithFields(logrus.Fields{"type": a.Type, "host_id": hostID}).Warn("host deleted in Fleet — Snipe-IT asset left in place (retire manually if needed)")
-		return nil
-	}
-
+// refresh pulls fresh detail for a host from Fleet and reconciles into Snipe-IT.
+// A 404 from Fleet means the host was deleted between the activity firing and
+// our pull — treat as a no-op rather than an error.
+func (h *activitiesHandler) refresh(ctx context.Context, hostID uint) error {
 	host, err := h.fleet.GetHost(ctx, hostID)
 	if err != nil {
 		if errors.Is(err, fleetapi.ErrNotFound) {
@@ -267,26 +275,6 @@ func parseActivities(body []byte) ([]activity, error) {
 	default:
 		return nil, fmt.Errorf("unexpected payload start: %q", trimmed[:1])
 	}
-}
-
-// hostIDsFor returns the host IDs an activity should trigger a re-sync for.
-// Returns an empty slice for activity types that don't affect Snipe-IT inventory.
-func hostIDsFor(a activity) []uint {
-	switch a.Type {
-	case "enrolled_host", "refetched_host", "mdm_enrolled", "mdm_unenrolled", "deleted_host":
-		var d singleHostDetails
-		if err := json.Unmarshal(a.Details, &d); err != nil || d.HostID == 0 {
-			return nil
-		}
-		return []uint{d.HostID}
-	case "transferred_hosts", "deleted_multiple_hosts":
-		var d multiHostDetails
-		if err := json.Unmarshal(a.Details, &d); err != nil {
-			return nil
-		}
-		return d.HostIDs
-	}
-	return nil
 }
 
 // authorize compares the configured shared secret to the request's header or
