@@ -18,6 +18,7 @@ import (
 
 	"github.com/CampusTech/fleet2snipe/config"
 	"github.com/CampusTech/fleet2snipe/fleetapi"
+	"github.com/CampusTech/fleet2snipe/images"
 	"github.com/CampusTech/fleet2snipe/snipe"
 )
 
@@ -59,8 +60,9 @@ type Engine struct {
 	fleet         *fleetapi.Client
 	snipe         *snipe.Client
 	cfg           *config.Config
-	models        map[string]int // hardware_model -> snipe model ID
-	manufacturers map[string]int // hardware_vendor (lowercased) -> snipe manufacturer ID
+	images        *images.Fetcher // nil = image fetching disabled
+	models        map[string]int  // hardware_model -> snipe model ID
+	manufacturers map[string]int  // hardware_vendor (lowercased) -> snipe manufacturer ID
 	stats         Stats
 }
 
@@ -78,6 +80,13 @@ func NewEngine(f *fleetapi.Client, s *snipe.Client, cfg *config.Config) *Engine 
 
 // Stats returns a copy of the running totals.
 func (e *Engine) Stats() Stats { return e.stats }
+
+// WithImages attaches a model-image fetcher. Pass nil to disable (default).
+// Returns the engine for chaining.
+func (e *Engine) WithImages(f *images.Fetcher) *Engine {
+	e.images = f
+	return e
+}
 
 // Warm loads existing Snipe-IT models and manufacturers into in-memory lookup
 // maps. Must be called before SyncHost / SyncAll.
@@ -440,6 +449,13 @@ func (e *Engine) ensureModel(ctx context.Context, h fleetapi.Host, logger *logru
 	m.Category.ID = categoryID
 	if e.cfg.SnipeIT.CustomFieldsetID > 0 {
 		m.FieldsetID = e.cfg.SnipeIT.CustomFieldsetID
+	}
+	if e.images != nil {
+		if img, err := e.images.ForHost(ctx, h); err != nil {
+			logger.WithError(err).Debug("could not fetch model image, continuing without")
+		} else if img != "" {
+			m.Image = img
+		}
 	}
 
 	created, err := e.snipe.CreateModel(ctx, m)

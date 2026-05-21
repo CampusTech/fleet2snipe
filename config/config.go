@@ -65,6 +65,9 @@ type SyncConfig struct {
 	// PlatformFilter optionally restricts the sync to Fleet hosts whose platform
 	// matches one of these values (e.g. ["darwin", "windows"]). Empty = all.
 	PlatformFilter []string `yaml:"platform_filter"`
+	// ModelImages enables fetching device images (appledb.dev for Apple hardware)
+	// and attaching them as the Snipe-IT model image at model-create time.
+	ModelImages bool `yaml:"model_images"`
 }
 
 // WebhookConfig holds settings for the `serve` subcommand.

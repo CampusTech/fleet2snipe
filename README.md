@@ -14,6 +14,7 @@ Inspired by [`grokability/jamf2snipe`](https://github.com/grokability/jamf2snipe
 - **Configurable field mapping** via [gjson paths](https://github.com/tidwall/gjson) into the Fleet host JSON — extend without touching code.
 - **`--dry-run`** writes are gated on every API call that mutates.
 - **Local cache** so dev iterations don't hit the Fleet API.
+- **Device images** fetched from [appledb.dev](https://appledb.dev) and attached to Apple model records in Snipe-IT (toggle via `sync.model_images`). Non-Apple vendors are skipped cleanly; the lookup table is per-source so new vendor backends can be slotted in.
 
 ## Quick start
 

@@ -54,6 +54,8 @@ sync:
   cache_dir: .cache
   set_name: true            # sync hostname/computer_name into Snipe-IT name field
   asset_tag_prefix: "fleet-"
+  model_images: true        # attach device images to newly-created models
+                            # (Apple devices via appledb.dev; other vendors skip)
   # platform_filter: ["darwin", "windows"]  # only sync these platforms
 
   # Field mappings: Snipe-IT custom field db_column_name -> gjson path into the

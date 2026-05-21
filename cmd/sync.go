@@ -10,6 +10,7 @@ import (
 
 	"github.com/CampusTech/fleet2snipe/config"
 	"github.com/CampusTech/fleet2snipe/fleetapi"
+	"github.com/CampusTech/fleet2snipe/images"
 	f2sync "github.com/CampusTech/fleet2snipe/sync"
 )
 
@@ -72,6 +73,9 @@ func runSync(cmd *cobra.Command, _ []string) error {
 	}
 
 	engine := f2sync.NewEngine(fleetClient, snipeClient, Cfg)
+	if Cfg.Sync.ModelImages {
+		engine.WithImages(images.NewFetcher())
+	}
 	if err := engine.Warm(ctx); err != nil {
 		return err
 	}

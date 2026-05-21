@@ -15,6 +15,7 @@ import (
 
 	"github.com/CampusTech/fleet2snipe/config"
 	"github.com/CampusTech/fleet2snipe/fleetapi"
+	"github.com/CampusTech/fleet2snipe/images"
 	"github.com/CampusTech/fleet2snipe/snipe"
 	f2sync "github.com/CampusTech/fleet2snipe/sync"
 )
@@ -98,6 +99,7 @@ func setAllLogLevels(l logrus.Level) {
 	fleetapi.SetLogLevel(l)
 	snipe.SetLogLevel(l)
 	f2sync.SetLogLevel(l)
+	images.SetLogLevel(l)
 }
 
 func setAllLogFormatters(f logrus.Formatter) {
@@ -105,6 +107,7 @@ func setAllLogFormatters(f logrus.Formatter) {
 	fleetapi.SetLogFormatter(f)
 	snipe.SetLogFormatter(f)
 	f2sync.SetLogFormatter(f)
+	images.SetLogFormatter(f)
 }
 
 func setAllLogOutputs(w io.Writer) {
@@ -112,6 +115,7 @@ func setAllLogOutputs(w io.Writer) {
 	fleetapi.SetLogOutput(w)
 	snipe.SetLogOutput(w)
 	f2sync.SetLogOutput(w)
+	images.SetLogOutput(w)
 }
 
 func applyBoolFlag(cmd *cobra.Command, name string, dst *bool) {
