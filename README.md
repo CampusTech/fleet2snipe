@@ -2,20 +2,19 @@
 
 Sync device inventory from [Fleet](https://fleetdm.com) into [Snipe-IT](https://snipeitapp.com). Written in Go.
 
-Inspired by [`grokability/jamf2snipe`](https://github.com/grokability/jamf2snipe), but for Fleet (osquery-based) instead of Jamf Pro, with a webhook listener for near-real-time updates.
+Inspired by [`grokability/jamf2snipe`](https://github.com/grokability/jamf2snipe) — same purpose, but sourced from Fleet (osquery-based, cross-platform) instead of Jamf Pro, with a webhook listener for near-real-time updates and richer mapping options (gjson, policies, saved queries, labels).
 
-## Features
+## What you get
 
-- **Two modes in one binary**
-  - `fleet2snipe sync` — full reconciliation. Run from cron / Cloud Run / manually.
-  - `fleet2snipe serve` — HTTP listener for Fleet automation webhooks. Targets a single host per event, no full scan.
-- **Hand-rolled, dependency-light Fleet client** — Bearer auth, pagination, retry on 429/5xx with `Retry-After`.
-- **Idempotent Snipe-IT bootstrap** (`setup` subcommand) creates custom fields, associates them with your fieldset, and writes the field mapping back to your config.
-- **Configurable field mapping** via [gjson paths](https://github.com/tidwall/gjson) into the Fleet host JSON — extend without touching code.
-- **Policy, saved-query & label mappings** — pipe Fleet policy pass/fail, osquery saved-query result columns, and label membership (per-label boolean + full comma-separated list) into Snipe-IT custom fields.
-- **`--dry-run`** writes are gated on every API call that mutates.
-- **Local cache** so dev iterations don't hit the Fleet API.
-- **Device images** fetched from [appledb.dev](https://appledb.dev) and attached to Apple model records in Snipe-IT (toggle via `sync.model_images`). Non-Apple vendors are skipped cleanly; the lookup table is per-source so new vendor backends can be slotted in.
+- **One binary, two modes** — `sync` (full reconciliation, run from cron) and `serve` (HTTP listener for Fleet activity webhooks; pulls one host per event).
+- **Five overlapping ways to map data into Snipe-IT custom fields**: gjson paths, policy pass/fail, saved-query result columns, per-label boolean, full label list.
+- **Idempotent `setup`** that creates the custom fields in Snipe-IT, associates them with your fieldset, and writes the resulting `field_mapping` back to your `settings.yaml`.
+- **Hand-rolled Fleet client** — Bearer auth, paginated listing, `Retry-After`-aware backoff. No `github.com/fleetdm/fleet/v4` import bloat.
+- **`michellepellon/go-snipeit`** for Snipe-IT, wrapped with dry-run enforcement and token-bucket rate limiting.
+- **Device images** for Apple hardware via [appledb.dev](https://appledb.dev), attached to newly-created Snipe-IT models.
+- **`--dry-run`** gated at every mutation; local **cache** for offline dev (`--use-cache`).
+- **Custom-field rejection retry** — if Snipe-IT rejects a field for being outside the model's fieldset, fleet2snipe strips it and retries so the rest of the update still lands.
+- **Distroless Dockerfile** and sample **systemd unit** included.
 
 ## Quick start
 
@@ -23,69 +22,149 @@ Inspired by [`grokability/jamf2snipe`](https://github.com/grokability/jamf2snipe
 go build ./...
 
 cp settings.example.yaml settings.yaml
-$EDITOR settings.yaml          # fill in fleet/snipe credentials + IDs
+$EDITOR settings.yaml                  # fill in Fleet/Snipe credentials + IDs
 
-./fleet2snipe test             # verify connectivity
-./fleet2snipe setup            # create custom fields in Snipe-IT
-./fleet2snipe sync --dry-run --verbose
-./fleet2snipe sync
+./fleet2snipe test                     # verify connectivity to both
+./fleet2snipe setup                    # create custom fields in Snipe-IT
+./fleet2snipe sync --dry-run --verbose # preview
+./fleet2snipe sync                     # do it
 ```
 
-## Webhook mode
+## Authentication
+
+**Fleet** — create an `api_only` user (Settings → Users → Create user → check **API only**), then copy their API token. Dedicate the account: any other login as that user rotates the token.
+
+**Snipe-IT** — Account → Manage API Keys → Create New Token.
+
+Set credentials via `settings.yaml` or env vars: `FLEET_URL`, `FLEET_TOKEN`, `SNIPE_URL`, `SNIPE_API_KEY`, `FLEET2SNIPE_WEBHOOK_SECRET`.
+
+## Two modes, one engine
+
+### `sync` — full reconciliation
+
+```sh
+./fleet2snipe sync                            # full sweep
+./fleet2snipe sync --force --verbose          # ignore freshness check
+./fleet2snipe sync --serial C02XK1JJJG5J      # one host
+./fleet2snipe sync --identifier <uuid|hostname|serial|node_key>
+./fleet2snipe sync --use-cache                # replay last fetch from .cache/hosts.json
+./fleet2snipe sync --update-only              # never create new assets
+```
+
+Run on a cron (every 15 min is typical) as your authoritative reconciliation loop. Fleet doesn't emit events when osquery re-reports, so detail drift (free disk space, IPs, OS minor versions) is only caught by polling.
+
+### `serve` — activity-driven wake-ups
 
 ```sh
 ./fleet2snipe serve --verbose
 ```
 
-In Fleet, go to **Settings → Integrations → Automations** and enable the **Activities** webhook pointing at `http(s)://<your-host>:9090/webhook/fleet?secret=<your-secret>`. (Fleet's other webhooks — host status, failing policies, vulnerabilities — fire on operational events, not inventory changes, so we ignore them.)
+In Fleet, **Settings → Integrations → Automations → Activities** webhook, posting to:
 
-The activity payload itself is treated as a **wake-up signal**. fleet2snipe extracts every `host_id` referenced anywhere in the batch, dedupes them, then `GET`s the full host detail from Fleet for each one and reconciles into Snipe-IT. This means:
+```
+https://<your-host>:9090/webhook/fleet?secret=<your-webhook-secret>
+```
 
-- We don't maintain a type allowlist — any current or future Fleet activity that names a host will trigger a refresh.
-- A burst of activities for the same host (enrolled + MDM enrolled + software installed landing together) results in **one** Fleet API call and one Snipe-IT update.
-- The 404 case (host was deleted between activity firing and our pull) is handled silently.
+The activity payload is treated as a **wake-up signal**. fleet2snipe extracts every `host_id` it can find in the batch, dedupes, then `GET`s `/api/v1/fleet/hosts/{id}` for each one and reconciles into Snipe-IT.
 
-`deleted_host` / `deleted_multiple_hosts` are the only special case: we log the event but leave the Snipe-IT asset in place (retire manually).
+- No activity-type allowlist — any current or future activity that references a host triggers a refresh.
+- A burst (e.g. enrollment + MDM enrolled + software installed for the same host, all landing together) becomes **one** Fleet pull and one Snipe-IT update.
+- A 404 from the detail fetch (host deleted mid-flight) is handled silently.
+- `deleted_host` / `deleted_multiple_hosts` activities are logged but the Snipe-IT asset is **left in place** — retire manually. We never auto-delete inventory.
 
-> **Fleet does not emit per-update webhooks.** Detail changes (OS upgrades, free-disk-space deltas, new IPs) only land in Fleet when osquery re-reports — there's no event for that. Run `fleet2snipe sync` on a cron (every 15 min is typical) as your authoritative reconciliation loop, with `serve` providing the near-real-time path for anything Fleet actually audit-logs.
+Fleet's other automation webhooks (host status, failing policies, vulnerabilities) fire on operational events rather than inventory changes, so we don't subscribe to them.
 
-## Authentication setup
+## How fields get populated
 
-### Fleet
+Five sources feed the same `custom_fields` map; values that come back empty are skipped (we never overwrite Snipe-IT data with `""`).
 
-Create an `api_only` user (Settings → Users → Create user, check **API only**) and grab their token from the user dropdown → My Account → Get API Token. Token rotation: any other login by that user invalidates the token, so dedicate the account.
+### 1. `field_mapping` — gjson paths into the host JSON
 
-### Snipe-IT
+Auto-populated by `fleet2snipe setup`. Use anywhere you'd reach into the host structure:
 
-Account → Manage API Keys → Create New Token.
+```yaml
+sync:
+  field_mapping:
+    _snipeit_fleet_host_id_1: id
+    _snipeit_fleet_os_version_2: os_version
+    _snipeit_mdm_enrollment_3: mdm.enrollment_status
+    _snipeit_first_label_4: labels.0.name
+```
+
+Full [gjson](https://github.com/tidwall/gjson) syntax (arrays, filters, modifiers) is supported.
+
+### 2. `policy_mapping` — Fleet policies (compliance "controls")
+
+```yaml
+sync:
+  policy_mapping:
+    _snipeit_filevault_10: "FileVault is enabled"
+    _snipeit_gatekeeper_11: "Gatekeeper is enabled"
+```
+
+Writes `"pass"` / `"fail"` / `""` per host. Free piggyback on the host detail — `populate_policies` is auto-enabled when this map is non-empty.
+
+### 3. `query_mapping` — osquery saved-query results
+
+```yaml
+sync:
+  query_mapping:
+    _snipeit_kernel_version_12:
+      query: "Kernel version"
+      column: "kernel_version"
+    _snipeit_ad_domain_13:
+      query: "Joined AD domain"
+      column: "domain"
+```
+
+The saved query must have **discard_data=false** (i.e. "Save results in Fleet"). Each configured query is fetched **once per sync run** and indexed by `host_id` — a 5,000-host fleet with three query mappings costs 3 API calls, not 15,000.
+
+### 4. `label_mapping` — per-label membership
+
+```yaml
+sync:
+  label_mapping:
+    _snipeit_is_engineering_15: "Engineering laptops"
+    _snipeit_is_kiosk_16: "Kiosks"
+```
+
+Writes `"yes"` if the host belongs to the named label, `"no"` otherwise. Auto-enables `populate_labels`.
+
+### 5. `labels_field` — full label list
+
+```yaml
+sync:
+  labels_field: _snipeit_fleet_labels_17
+```
+
+A single Snipe-IT field that receives an alphabetised, comma-separated list of every label the host belongs to. Sorted output means a stable membership set produces a stable field value — no PATCH churn.
 
 ## Setup subcommand
 
-`fleet2snipe setup` is idempotent and safe to re-run. It:
+`fleet2snipe setup` is **idempotent** and safe to re-run. It creates / updates a baseline set of `Fleet: …` custom fields in Snipe-IT, associates them with your configured fieldset, and rewrites `sync.field_mapping` in `settings.yaml` (preserving comments) with the resulting `db_column_name`s.
 
-1. Creates / updates the **Fleet:** custom field set in Snipe-IT, scoped to the configured fieldset.
-2. Refreshes `sync.field_mapping` in your `settings.yaml` so the sync engine knows where to write each field's value.
+**Manual prereqs in Snipe-IT** (one time):
 
-Prereqs you do manually in Snipe-IT before running setup:
+1. Create a fieldset → `snipe_it.custom_fieldset_id`.
+2. Create a status label for new assets → `snipe_it.default_status_id`.
+3. Create one or more model categories (e.g. per OS family) → `snipe_it.category_ids`.
 
-- Create a fieldset, copy its ID into `snipe_it.custom_fieldset_id`.
-- Create a status label, copy its ID into `snipe_it.default_status_id`.
-- Create one or more model categories (e.g. one per OS family) and copy IDs into `snipe_it.category_ids`.
-
-Manufacturers can be left blank — `sync` auto-creates them from Fleet's `hardware_vendor` field.
+Manufacturers can be left blank — `sync` auto-creates them from Fleet's `hardware_vendor`.
 
 ## Operating notes
 
-- **Asset matching** is by `hardware_serial`. Hosts with no serial are skipped. Multiple Snipe-IT assets sharing a serial are flagged and skipped rather than potentially clobbering the wrong record.
-- **Policy, saved-query & label attributes**: Snipe-IT custom fields can be populated from Fleet policies, osquery saved-query results, and label memberships. See `policy_mapping`, `query_mapping`, `label_mapping`, and `labels_field` in `settings.example.yaml`. Policy responses ("pass"/"fail") and label memberships are read from the host detail (free, no extra calls — `populate_policies`/`populate_labels` are auto-enabled). Saved-query reports are fetched once per query per run and indexed by `host_id` — so a 5,000-host fleet with three query mappings costs 3 API calls, not 15,000.
-- **Freshness check**: by default, a host whose Fleet `detail_updated_at` is older than Snipe-IT's `updated_at` is skipped. Use `--force` or `sync.force: true` to ignore.
-- **Model creation**: uses `hardware_model` (e.g. `MacBookPro17,1`) as both the model name and number.
-- **Custom-field rejection retry**: if Snipe-IT rejects fields with "not available on this Asset Model's fieldset", fleet2snipe strips them and retries once so the rest of the update still lands. Run `fleet2snipe setup` to fix the underlying fieldset configuration.
+- **Match key**: `hardware_serial`. Hosts with no serial are skipped. Two Snipe-IT assets sharing a serial → flagged and skipped to avoid clobbering the wrong record.
+- **Freshness check**: a host whose Fleet `detail_updated_at` is older than Snipe-IT's `updated_at` is skipped. Use `--force` (or `sync.force: true`) to ignore.
+- **Asset tag**: defaults to `fleet-<host_id>`. Override the prefix via `sync.asset_tag_prefix`.
+- **Model creation**: uses `hardware_model` (e.g. `MacBookPro17,1`) as both the model name and number, attaches the fieldset, and on Apple devices fetches an image from appledb.dev when `sync.model_images: true`.
+- **Custom-field rejection retry**: if Snipe-IT rejects fields with "not available on this Asset Model's fieldset", fleet2snipe strips the bad keys and retries once so the rest of the update applies. Re-run `fleet2snipe setup` to fix the underlying fieldset config.
+- **Platform filtering**: `sync.platform_filter: ["darwin", "windows"]` to limit which platforms get synced.
 
 ## Docker
 
 ```sh
 docker build -t fleet2snipe .
+
 docker run --rm \
   -e FLEET_URL=https://fleet.example.com \
   -e FLEET_TOKEN=... \
@@ -95,6 +174,12 @@ docker run --rm \
   -v $(pwd)/settings.yaml:/app/settings.yaml:ro \
   -p 9090:9090 fleet2snipe serve
 ```
+
+Or run a one-shot `sync` from a Kubernetes / Cloud Run cron with the same flags.
+
+## Why hand-roll the Fleet client?
+
+`github.com/fleetdm/fleet/v4/server/service` exposes a usable Go client, but importing it drags in the full Fleet server module (MySQL, NanoMDM, AWS SDKs, MaxMind, k8s libs, …). For a small CLI that only needs five endpoints — list hosts, get host, list queries, get query report, list labels — a few hundred lines of `net/http` is the right trade.
 
 ## License
 
