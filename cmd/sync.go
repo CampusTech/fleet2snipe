@@ -51,6 +51,13 @@ func runSync(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
+	// Auto-enable populate_policies when the user has a policy_mapping — the
+	// list endpoint omits policies by default and the sync engine can't read
+	// what isn't there.
+	if len(Cfg.Sync.PolicyMapping) > 0 {
+		Cfg.Fleet.PopulatePolicies = true
+	}
+
 	if Cfg.Sync.DryRun {
 		log.Info("running in DRY RUN mode — no changes will be made")
 	}
@@ -134,6 +141,7 @@ func loadHosts(ctx context.Context, client *fleetapi.Client, cfg *config.Config)
 		PopulateSoftware: cfg.Fleet.PopulateSoftware,
 		PopulateLabels:   cfg.Fleet.PopulateLabels,
 		PopulateUsers:    cfg.Fleet.PopulateUsers,
+		PopulatePolicies: cfg.Fleet.PopulatePolicies,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("fetching hosts: %w", err)

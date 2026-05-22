@@ -346,6 +346,33 @@ func (c *Client) ListLabels(ctx context.Context) ([]Label, error) {
 	return env.Labels, nil
 }
 
+// ListQueries returns all saved queries the token can see (global + team-scoped).
+func (c *Client) ListQueries(ctx context.Context) ([]Query, error) {
+	resp, err := c.do(ctx, http.MethodGet, "/api/v1/fleet/queries", nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	var env listQueriesResponse
+	if err := readJSON(resp, &env); err != nil {
+		return nil, err
+	}
+	return env.Queries, nil
+}
+
+// QueryReport returns retained result rows for one saved query. Empty when the
+// query has discard_data=true or has never run.
+func (c *Client) QueryReport(ctx context.Context, queryID uint) ([]QueryReportRow, error) {
+	resp, err := c.do(ctx, http.MethodGet, fmt.Sprintf("/api/v1/fleet/queries/%d/report", queryID), nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	var env queryReportResponse
+	if err := readJSON(resp, &env); err != nil {
+		return nil, err
+	}
+	return env.Results, nil
+}
+
 // ListTeams returns all teams.
 func (c *Client) ListTeams(ctx context.Context) ([]Team, error) {
 	resp, err := c.do(ctx, http.MethodGet, "/api/v1/fleet/teams", nil, nil)

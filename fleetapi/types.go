@@ -50,6 +50,7 @@ type Host struct {
 	TeamName                  string    `json:"team_name"`
 	MDM                       MDM       `json:"mdm"`
 	Issues                    Issues    `json:"issues"`
+	Policies                  []Policy  `json:"policies"` // populated when populate_policies=true (list) or via GET /hosts/{id} (detail)
 
 	// Raw is the full JSON object as returned by Fleet. The sync engine reads
 	// custom field_mapping paths via gjson against this — keeps the Host struct
@@ -80,6 +81,49 @@ type listHostsResponse struct {
 // hostDetailResponse wraps GET /hosts/{id}.
 type hostDetailResponse struct {
 	Host json.RawMessage `json:"host"`
+}
+
+// Policy is a Fleet policy attached to a host. Response is "pass", "fail",
+// or "" (never evaluated). Critical indicates a high-severity policy.
+type Policy struct {
+	ID          uint   `json:"id"`
+	Name        string `json:"name"`
+	Query       string `json:"query"`
+	Description string `json:"description"`
+	Response    string `json:"response"`
+	Critical    bool   `json:"critical"`
+	Resolution  string `json:"resolution"`
+	Platform    string `json:"platform"`
+}
+
+// Query is a Fleet saved query.
+type Query struct {
+	ID           uint   `json:"id"`
+	Name         string `json:"name"`
+	Description  string `json:"description"`
+	Query        string `json:"query"`
+	TeamID       *uint  `json:"team_id"`
+	Interval     int    `json:"interval"`
+	Platform     string `json:"platform"`
+	DiscardData  bool   `json:"discard_data"`
+	AutomationsEnabled bool `json:"automations_enabled"`
+}
+
+type listQueriesResponse struct {
+	Queries []Query `json:"queries"`
+}
+
+// QueryReportRow is one host's result row for a saved query.
+type QueryReportRow struct {
+	HostID      uint              `json:"host_id"`
+	HostName    string            `json:"host_name"`
+	LastFetched time.Time         `json:"last_fetched"`
+	Columns     map[string]string `json:"columns"`
+}
+
+type queryReportResponse struct {
+	QueryID uint             `json:"query_id"`
+	Results []QueryReportRow `json:"results"`
 }
 
 // Label is the subset of fields we read from /labels.

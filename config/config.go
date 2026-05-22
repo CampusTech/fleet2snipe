@@ -29,6 +29,7 @@ type FleetConfig struct {
 	PopulateSoftware bool   `yaml:"populate_software"` // include software inventory (without vuln details)
 	PopulateLabels   bool   `yaml:"populate_labels"`
 	PopulateUsers    bool   `yaml:"populate_users"`
+	PopulatePolicies bool   `yaml:"populate_policies"` // include policy results (auto-enabled when sync.policy_mapping is set)
 }
 
 // SnipeITConfig holds Snipe-IT API settings.
@@ -68,6 +69,21 @@ type SyncConfig struct {
 	// ModelImages enables fetching device images (appledb.dev for Apple hardware)
 	// and attaching them as the Snipe-IT model image at model-create time.
 	ModelImages bool `yaml:"model_images"`
+	// PolicyMapping maps a Snipe-IT custom field db_column_name to a Fleet
+	// policy name. The host's evaluated response ("pass"/"fail"/"") is written
+	// into the field. populate_policies is auto-enabled when this is non-empty.
+	PolicyMapping map[string]string `yaml:"policy_mapping"`
+	// QueryMapping maps a Snipe-IT custom field db_column_name to a saved-query
+	// result column. Saved queries must have discard_data=false; each configured
+	// query is fetched once per sync run and a per-host lookup table is built.
+	QueryMapping map[string]QueryFieldMap `yaml:"query_mapping"`
+}
+
+// QueryFieldMap names a saved Fleet query and the result column to copy
+// into a Snipe-IT custom field.
+type QueryFieldMap struct {
+	Query  string `yaml:"query"`  // saved query name (resolved to ID at warm time)
+	Column string `yaml:"column"` // result column from the row Fleet returns
 }
 
 // WebhookConfig holds settings for the `serve` subcommand.

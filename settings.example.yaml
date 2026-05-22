@@ -14,6 +14,7 @@ fleet:
   populate_software: false  # set true if you map software fields (heavier)
   populate_labels: false
   populate_users: false
+  populate_policies: false  # auto-enabled when sync.policy_mapping is non-empty
 
 snipe_it:
   url: https://snipe.example.com
@@ -65,6 +66,25 @@ sync:
   #   _snipeit_fleet_host_id_1: id
   #   _snipeit_fleet_os_version_2: os_version
   #   _snipeit_fleet_mdm_enrollment_3: mdm.enrollment_status
+
+  # Policy mappings: Snipe-IT custom field db_column -> Fleet policy name.
+  # Writes the host's pass/fail response into the field. populate_policies
+  # is auto-enabled when this map is non-empty.
+  # policy_mapping:
+  #   _snipeit_filevault_enabled_10: "FileVault is enabled"
+  #   _snipeit_gatekeeper_11: "Gatekeeper is enabled"
+
+  # Query mappings: Snipe-IT custom field db_column -> saved Fleet query
+  # result column. The saved query must have discard_data=false (i.e.
+  # "Save results in Fleet" enabled). Fleet returns the most recent row
+  # per host; we copy `column` from that row.
+  # query_mapping:
+  #   _snipeit_kernel_version_12:
+  #     query: "Kernel version"
+  #     column: "kernel_version"
+  #   _snipeit_active_directory_domain_13:
+  #     query: "Joined AD domain"
+  #     column: "domain"
 
 webhook:
   # `serve` listens for Fleet's activities webhook here.

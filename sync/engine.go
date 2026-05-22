@@ -64,6 +64,11 @@ type Engine struct {
 	models        map[string]int  // hardware_model -> snipe model ID
 	manufacturers map[string]int  // hardware_vendor (lowercased) -> snipe manufacturer ID
 	stats         Stats
+
+	// queryResults[snipeDBColumn][hostID] = value. Populated during Warm by
+	// fetching the report for each saved query in cfg.Sync.QueryMapping once
+	// and turning it into a fast per-host lookup. Avoids one API call per host.
+	queryResults map[string]map[uint]string
 }
 
 // NewEngine constructs an Engine. The Fleet client may be nil if all hosts
@@ -75,6 +80,7 @@ func NewEngine(f *fleetapi.Client, s *snipe.Client, cfg *config.Config) *Engine 
 		cfg:           cfg,
 		models:        make(map[string]int),
 		manufacturers: make(map[string]int),
+		queryResults:  make(map[string]map[uint]string),
 	}
 }
 
@@ -119,6 +125,52 @@ func (e *Engine) Warm(ctx context.Context) error {
 	}
 	log.WithField("count", len(mfgs)).Info("loaded snipe-it manufacturers")
 
+	if err := e.loadQueryReports(ctx); err != nil {
+		// Saved-query mapping failures are non-fatal — degrade by leaving
+		// those fields blank rather than aborting the whole sync.
+		log.WithError(err).Warn("could not pre-fetch saved-query reports; query_mapping fields will be empty")
+	}
+	return nil
+}
+
+// loadQueryReports resolves each configured query name to an ID, fetches its
+// report once, and indexes the result by host_id so SyncHost can do O(1) lookups.
+func (e *Engine) loadQueryReports(ctx context.Context) error {
+	if len(e.cfg.Sync.QueryMapping) == 0 || e.fleet == nil {
+		return nil
+	}
+	queries, err := e.fleet.ListQueries(ctx)
+	if err != nil {
+		return fmt.Errorf("listing queries: %w", err)
+	}
+	idByName := make(map[string]uint, len(queries))
+	for _, q := range queries {
+		idByName[q.Name] = q.ID
+	}
+	for dbCol, qm := range e.cfg.Sync.QueryMapping {
+		if qm.Query == "" || qm.Column == "" {
+			log.WithField("db_column", dbCol).Warn("query_mapping entry missing query or column, skipping")
+			continue
+		}
+		qid, ok := idByName[qm.Query]
+		if !ok {
+			log.WithFields(logrus.Fields{"db_column": dbCol, "query": qm.Query}).Warn("saved query not found in Fleet, skipping mapping")
+			continue
+		}
+		rows, err := e.fleet.QueryReport(ctx, qid)
+		if err != nil {
+			log.WithError(err).WithField("query", qm.Query).Warn("could not fetch query report")
+			continue
+		}
+		hostLookup := make(map[uint]string, len(rows))
+		for _, r := range rows {
+			if v, ok := r.Columns[qm.Column]; ok && v != "" {
+				hostLookup[r.HostID] = v
+			}
+		}
+		e.queryResults[dbCol] = hostLookup
+		log.WithFields(logrus.Fields{"query": qm.Query, "column": qm.Column, "hosts": len(hostLookup)}).Info("indexed saved-query report")
+	}
 	return nil
 }
 
@@ -325,30 +377,62 @@ func preferredName(h fleetapi.Host) string {
 	return ""
 }
 
-// applyMapping evaluates each configured gjson path against the host's raw
-// JSON and returns the resulting Snipe-IT custom_field DB column -> value map.
+// applyMapping evaluates every configured source against a host and returns
+// the merged Snipe-IT custom_field DB column -> value map. Sources, in order:
+//   - sync.field_mapping: gjson paths into the host JSON
+//   - sync.policy_mapping: pass/fail response from a named Fleet policy
+//   - sync.query_mapping: a column from the host's row in a saved query's report
+//
 // Empty / missing values are skipped so we never overwrite Snipe data with "".
 func (e *Engine) applyMapping(h fleetapi.Host) map[string]string {
-	if len(e.cfg.Sync.FieldMapping) == 0 || len(h.Raw) == 0 {
+	out := make(map[string]string)
+
+	if len(e.cfg.Sync.FieldMapping) > 0 && len(h.Raw) > 0 {
+		root := gjson.ParseBytes(h.Raw)
+		for dbCol, path := range e.cfg.Sync.FieldMapping {
+			if dbCol == "" || path == "" {
+				continue
+			}
+			res := root.Get(path)
+			if !res.Exists() {
+				continue
+			}
+			if val := stringifyGJSON(res); val != "" {
+				out[dbCol] = val
+			}
+		}
+	}
+
+	for dbCol, policyName := range e.cfg.Sync.PolicyMapping {
+		if dbCol == "" || policyName == "" {
+			continue
+		}
+		if v := policyResponse(h.Policies, policyName); v != "" {
+			out[dbCol] = v
+		}
+	}
+
+	for dbCol := range e.cfg.Sync.QueryMapping {
+		if v, ok := e.queryResults[dbCol][h.ID]; ok && v != "" {
+			out[dbCol] = v
+		}
+	}
+
+	if len(out) == 0 {
 		return nil
 	}
-	root := gjson.ParseBytes(h.Raw)
-	out := make(map[string]string, len(e.cfg.Sync.FieldMapping))
-	for dbCol, path := range e.cfg.Sync.FieldMapping {
-		if dbCol == "" || path == "" {
-			continue
-		}
-		res := root.Get(path)
-		if !res.Exists() {
-			continue
-		}
-		val := stringifyGJSON(res)
-		if val == "" {
-			continue
-		}
-		out[dbCol] = val
-	}
 	return out
+}
+
+// policyResponse finds a policy by name in the host's policy list and returns
+// its response ("pass" / "fail" / "" if never evaluated or not found).
+func policyResponse(policies []fleetapi.Policy, name string) string {
+	for _, p := range policies {
+		if p.Name == name {
+			return p.Response
+		}
+	}
+	return ""
 }
 
 // stringifyGJSON renders a gjson Result as a single string suitable for
