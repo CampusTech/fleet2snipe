@@ -12,7 +12,7 @@ Inspired by [`grokability/jamf2snipe`](https://github.com/grokability/jamf2snipe
 - **Hand-rolled, dependency-light Fleet client** — Bearer auth, pagination, retry on 429/5xx with `Retry-After`.
 - **Idempotent Snipe-IT bootstrap** (`setup` subcommand) creates custom fields, associates them with your fieldset, and writes the field mapping back to your config.
 - **Configurable field mapping** via [gjson paths](https://github.com/tidwall/gjson) into the Fleet host JSON — extend without touching code.
-- **Policy & saved-query mappings** — pipe Fleet policy pass/fail and osquery saved-query result columns into Snipe-IT custom fields.
+- **Policy, saved-query & label mappings** — pipe Fleet policy pass/fail, osquery saved-query result columns, and label membership (per-label boolean + full comma-separated list) into Snipe-IT custom fields.
 - **`--dry-run`** writes are gated on every API call that mutates.
 - **Local cache** so dev iterations don't hit the Fleet API.
 - **Device images** fetched from [appledb.dev](https://appledb.dev) and attached to Apple model records in Snipe-IT (toggle via `sync.model_images`). Non-Apple vendors are skipped cleanly; the lookup table is per-source so new vendor backends can be slotted in.
@@ -77,7 +77,7 @@ Manufacturers can be left blank — `sync` auto-creates them from Fleet's `hardw
 ## Operating notes
 
 - **Asset matching** is by `hardware_serial`. Hosts with no serial are skipped. Multiple Snipe-IT assets sharing a serial are flagged and skipped rather than potentially clobbering the wrong record.
-- **Policy & saved-query attributes**: Snipe-IT custom fields can be populated from Fleet policies (compliance "controls") and from osquery saved-query results. See `policy_mapping` and `query_mapping` in `settings.example.yaml`. Policy responses ("pass"/"fail") are read from the host detail. Saved-query reports are fetched once per query per run and indexed by `host_id` — so a 5,000-host fleet with three query mappings costs 3 API calls, not 15,000.
+- **Policy, saved-query & label attributes**: Snipe-IT custom fields can be populated from Fleet policies, osquery saved-query results, and label memberships. See `policy_mapping`, `query_mapping`, `label_mapping`, and `labels_field` in `settings.example.yaml`. Policy responses ("pass"/"fail") and label memberships are read from the host detail (free, no extra calls — `populate_policies`/`populate_labels` are auto-enabled). Saved-query reports are fetched once per query per run and indexed by `host_id` — so a 5,000-host fleet with three query mappings costs 3 API calls, not 15,000.
 - **Freshness check**: by default, a host whose Fleet `detail_updated_at` is older than Snipe-IT's `updated_at` is skipped. Use `--force` or `sync.force: true` to ignore.
 - **Model creation**: uses `hardware_model` (e.g. `MacBookPro17,1`) as both the model name and number.
 - **Custom-field rejection retry**: if Snipe-IT rejects fields with "not available on this Asset Model's fieldset", fleet2snipe strips them and retries once so the rest of the update still lands. Run `fleet2snipe setup` to fix the underlying fieldset configuration.

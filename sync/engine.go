@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -378,10 +379,12 @@ func preferredName(h fleetapi.Host) string {
 }
 
 // applyMapping evaluates every configured source against a host and returns
-// the merged Snipe-IT custom_field DB column -> value map. Sources, in order:
+// the merged Snipe-IT custom_field DB column -> value map. Sources:
 //   - sync.field_mapping: gjson paths into the host JSON
 //   - sync.policy_mapping: pass/fail response from a named Fleet policy
-//   - sync.query_mapping: a column from the host's row in a saved query's report
+//   - sync.query_mapping:  a column from the host's row in a saved query's report
+//   - sync.label_mapping:  "yes"/"no" depending on host membership in a named label
+//   - sync.labels_field:   comma-separated list of every label the host belongs to
 //
 // Empty / missing values are skipped so we never overwrite Snipe data with "".
 func (e *Engine) applyMapping(h fleetapi.Host) map[string]string {
@@ -415,6 +418,38 @@ func (e *Engine) applyMapping(h fleetapi.Host) map[string]string {
 	for dbCol := range e.cfg.Sync.QueryMapping {
 		if v, ok := e.queryResults[dbCol][h.ID]; ok && v != "" {
 			out[dbCol] = v
+		}
+	}
+
+	if len(e.cfg.Sync.LabelMapping) > 0 {
+		// Lowercased name set for O(1) per-label membership checks; built once
+		// per host rather than O(N*M) nested loops on big label sets.
+		set := make(map[string]struct{}, len(h.Labels))
+		for _, l := range h.Labels {
+			set[strings.ToLower(l.Name)] = struct{}{}
+		}
+		for dbCol, labelName := range e.cfg.Sync.LabelMapping {
+			if dbCol == "" || labelName == "" {
+				continue
+			}
+			if _, ok := set[strings.ToLower(labelName)]; ok {
+				out[dbCol] = "yes"
+			} else {
+				out[dbCol] = "no"
+			}
+		}
+	}
+
+	if e.cfg.Sync.LabelsField != "" && len(h.Labels) > 0 {
+		names := make([]string, 0, len(h.Labels))
+		for _, l := range h.Labels {
+			if n := strings.TrimSpace(l.Name); n != "" {
+				names = append(names, n)
+			}
+		}
+		if len(names) > 0 {
+			sort.Strings(names) // deterministic so we don't churn the field on every sync
+			out[e.cfg.Sync.LabelsField] = strings.Join(names, ", ")
 		}
 	}
 

@@ -86,6 +86,17 @@ sync:
   #     query: "Joined AD domain"
   #     column: "domain"
 
+  # Label mappings: Snipe-IT custom field db_column -> Fleet label name.
+  # Field is set to "yes" if the host belongs to the label, "no" otherwise.
+  # populate_labels is auto-enabled when this is non-empty.
+  # label_mapping:
+  #   _snipeit_is_engineering_15: "Engineering laptops"
+  #   _snipeit_is_kiosk_16: "Kiosks"
+
+  # Labels list: a single Snipe-IT custom field db_column that receives a
+  # comma-separated, alphabetised list of every label the host belongs to.
+  # labels_field: _snipeit_fleet_labels_17
+
 webhook:
   # `serve` listens for Fleet's activities webhook here.
   # Configure under Fleet Settings → Integrations → Automations → Activities.

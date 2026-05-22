@@ -51,11 +51,13 @@ func runSync(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	// Auto-enable populate_policies when the user has a policy_mapping — the
-	// list endpoint omits policies by default and the sync engine can't read
-	// what isn't there.
+	// Auto-enable populate_* on the list endpoint when their corresponding
+	// mappings are set — the sync engine can't read what Fleet doesn't return.
 	if len(Cfg.Sync.PolicyMapping) > 0 {
 		Cfg.Fleet.PopulatePolicies = true
+	}
+	if len(Cfg.Sync.LabelMapping) > 0 || Cfg.Sync.LabelsField != "" {
+		Cfg.Fleet.PopulateLabels = true
 	}
 
 	if Cfg.Sync.DryRun {

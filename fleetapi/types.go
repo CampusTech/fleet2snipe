@@ -51,6 +51,7 @@ type Host struct {
 	MDM                       MDM       `json:"mdm"`
 	Issues                    Issues    `json:"issues"`
 	Policies                  []Policy  `json:"policies"` // populated when populate_policies=true (list) or via GET /hosts/{id} (detail)
+	Labels                    []Label   `json:"labels"`   // populated when populate_labels=true (list) or via GET /hosts/{id} (detail)
 
 	// Raw is the full JSON object as returned by Fleet. The sync engine reads
 	// custom field_mapping paths via gjson against this — keeps the Host struct

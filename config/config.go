@@ -77,6 +77,14 @@ type SyncConfig struct {
 	// result column. Saved queries must have discard_data=false; each configured
 	// query is fetched once per sync run and a per-host lookup table is built.
 	QueryMapping map[string]QueryFieldMap `yaml:"query_mapping"`
+	// LabelMapping maps a Snipe-IT custom field db_column_name to a Fleet label
+	// name. The field is set to "yes" when the host belongs to the label and
+	// "no" otherwise. populate_labels is auto-enabled when this is non-empty.
+	LabelMapping map[string]string `yaml:"label_mapping"`
+	// LabelsField, if set, is a Snipe-IT custom field db_column_name that
+	// receives a comma-separated list of every label name the host belongs to.
+	// populate_labels is auto-enabled when this is non-empty.
+	LabelsField string `yaml:"labels_field"`
 }
 
 // QueryFieldMap names a saved Fleet query and the result column to copy
