@@ -66,7 +66,8 @@ type SyncConfig struct {
 	UseCache       bool   `yaml:"use_cache"`        // sync from cached hosts.json instead of API
 	CacheDir       string `yaml:"cache_dir"`        // default ".cache"
 	SetName        bool   `yaml:"set_name"`         // sync hostname into Snipe-IT name field
-	AssetTagPrefix string `yaml:"asset_tag_prefix"` // prefix for generated asset tags (default "fleet-")
+	AssetTagPrefix string         `yaml:"asset_tag_prefix"` // legacy: prepended to host id when sync.asset_tag.template is unset
+	AssetTag       AssetTagConfig `yaml:"asset_tag"`        // template-based asset tag generator
 	// FieldMapping maps a Snipe-IT custom field DB column (e.g. "_snipeit_os_version_3")
 	// to a gjson path into the Fleet host JSON (e.g. "os_version", "mdm.enrollment_status",
 	// "hardware_serial"). The setup command populates this automatically.
@@ -124,6 +125,24 @@ type CheckoutConfig struct {
 type QueryFieldMap struct {
 	Query  string `yaml:"query"`  // saved query name (resolved to ID at warm time)
 	Column string `yaml:"column"` // result column from the row Fleet returns
+}
+
+// AssetTagConfig controls how asset tags are generated for newly-created
+// Snipe-IT assets. Mirrors kandji2snipe's [asset-tag] section but uses gjson
+// templates so any field from the host JSON can be interpolated.
+type AssetTagConfig struct {
+	// Template is the default pattern. Placeholders in {curly.braces} are
+	// gjson paths into the Fleet host JSON; literal text is preserved.
+	// Examples:
+	//   "fleet-{id}"            → fleet-42
+	//   "CG-{hardware_serial}"  → CG-C02XK1JJJG5J
+	// An explicit empty string ("") means: omit asset_tag from the create
+	// payload so Snipe-IT auto-assigns one (jamf2snipe's --auto_incrementing).
+	Template string `yaml:"template"`
+	// PlatformTemplates overrides Template per Fleet platform (case-insensitive
+	// keys: darwin, windows, linux, chrome, ios, ipados, …). Falls back to
+	// Template when the platform is not listed.
+	PlatformTemplates map[string]string `yaml:"platform_templates"`
 }
 
 // WebhookConfig holds settings for the `serve` subcommand.

@@ -193,7 +193,7 @@ snipe_it:
 
 - **Match key**: `hardware_serial`. Hosts with no serial are skipped. Two Snipe-IT assets sharing a serial → flagged and skipped to avoid clobbering the wrong record.
 - **Freshness check**: a host whose Fleet `detail_updated_at` is older than Snipe-IT's `updated_at` is skipped. Use `--force` (or `sync.force: true`) to ignore.
-- **Asset tag**: defaults to `fleet-<host_id>`. Override the prefix via `sync.asset_tag_prefix`.
+- **Asset tag**: template-driven. `sync.asset_tag.template` is a string with `{gjson.path}` placeholders interpolated from the Fleet host JSON (e.g. `"CG-{hardware_serial}"`, `"{platform}-{id}"`). `sync.asset_tag.platform_templates` overrides per Fleet platform (mirrors kandji2snipe's per-platform patterns). An explicit empty string asks Snipe-IT to auto-assign (jamf2snipe's `--auto_incrementing`). Legacy `sync.asset_tag_prefix` is still honored as a shortcut for `"{prefix}{id}"`.
 - **Model creation**: uses `hardware_model` (e.g. `MacBookPro17,1`) as both the model name and number, attaches the fieldset, and on Apple devices fetches an image from appledb.dev when `sync.model_images: true`.
 - **Custom-field rejection retry**: if Snipe-IT rejects fields with "not available on this Asset Model's fieldset", fleet2snipe strips the bad keys and retries once so the rest of the update applies. Re-run `fleet2snipe setup` to fix the underlying fieldset config.
 - **Platform filtering**: `sync.platform_filter: ["darwin", "windows"]` to limit which platforms get synced.

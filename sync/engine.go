@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -509,14 +510,91 @@ func extractCheckoutKey(raw []byte, path string) string {
 }
 
 // assetTag returns the asset tag to use when creating a new asset.
-// Format: <prefix><fleet host id>. When the prefix is empty the default is "fleet-".
+// Resolution order:
+//  1. sync.asset_tag.platform_templates[host.platform] — per-platform override
+//  2. sync.asset_tag.template — global template
+//  3. legacy: sync.asset_tag_prefix + "{id}"
+//  4. default: "fleet-{id}"
+//
+// An empty resolved template means "let Snipe-IT auto-assign" — the engine
+// passes "" to the Asset, and go-snipeit's MarshalJSON omits the field.
 func (e *Engine) assetTag(h fleetapi.Host) string {
-	prefix := e.cfg.Sync.AssetTagPrefix
-	if prefix == "" {
-		prefix = "fleet-"
+	tpl, explicit := e.effectiveAssetTagTemplate(h.Platform)
+	if explicit && tpl == "" {
+		// User deliberately set an empty template — auto-assign.
+		return ""
 	}
-	return prefix + strconv.FormatUint(uint64(h.ID), 10)
+	if tpl == "" {
+		// Nothing configured; use the historical default.
+		tpl = "fleet-{id}"
+		if e.cfg.Sync.AssetTagPrefix != "" {
+			tpl = e.cfg.Sync.AssetTagPrefix + "{id}"
+		}
+	}
+	return renderAssetTag(tpl, h)
 }
+
+// effectiveAssetTagTemplate picks the right template for a platform, plus a
+// boolean indicating whether the user explicitly configured one (even if "").
+// This distinguishes "auto-assign please" from "use the legacy/default".
+func (e *Engine) effectiveAssetTagTemplate(platform string) (string, bool) {
+	platform = strings.ToLower(strings.TrimSpace(platform))
+	if v, ok := e.cfg.Sync.AssetTag.PlatformTemplates[platform]; ok {
+		return v, true
+	}
+	// Look up by lowercased key explicitly — YAML preserves the user's casing.
+	for k, v := range e.cfg.Sync.AssetTag.PlatformTemplates {
+		if strings.ToLower(k) == platform {
+			return v, true
+		}
+	}
+	// Distinguish "template field present" from "absent" by checking the parent
+	// struct's zero state — but Go can't, so look at whether either side of the
+	// asset_tag block is non-empty. Both empty + no key = "not configured".
+	if e.cfg.Sync.AssetTag.Template != "" {
+		return e.cfg.Sync.AssetTag.Template, true
+	}
+	return "", false
+}
+
+// renderAssetTag interpolates {gjson.path} placeholders in a template against
+// the host's raw JSON. Unmatched placeholders are replaced with "".
+func renderAssetTag(template string, h fleetapi.Host) string {
+	if template == "" {
+		return ""
+	}
+	raw := h.Raw
+	return assetTagPlaceholderRe.ReplaceAllStringFunc(template, func(m string) string {
+		path := strings.TrimSpace(m[1 : len(m)-1])
+		if path == "" {
+			return ""
+		}
+		if len(raw) == 0 {
+			// Fall back to common fields directly off the struct when Raw is empty
+			// (e.g. unit tests that don't round-trip through JSON).
+			switch path {
+			case "id":
+				return strconv.FormatUint(uint64(h.ID), 10)
+			case "hardware_serial":
+				return h.HardwareSerial
+			case "hardware_model":
+				return h.HardwareModel
+			case "hostname":
+				return h.Hostname
+			case "platform":
+				return h.Platform
+			case "uuid":
+				return h.UUID
+			}
+			return ""
+		}
+		return gjson.GetBytes(raw, path).String()
+	})
+}
+
+// assetTagPlaceholderRe matches {anything-but-braces} placeholders. The path
+// inside the braces is treated as a gjson path.
+var assetTagPlaceholderRe = regexp.MustCompile(`\{[^{}]+\}`)
 
 // preferredName picks the most useful display string for a host.
 func preferredName(h fleetapi.Host) string {

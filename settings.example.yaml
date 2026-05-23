@@ -69,9 +69,26 @@ sync:
   use_cache: false
   cache_dir: .cache
   set_name: true            # sync hostname/computer_name into Snipe-IT name field
-  asset_tag_prefix: "fleet-"
   model_images: true        # attach device images to newly-created models
                             # (Apple devices via appledb.dev; other vendors skip)
+
+  # Asset tag generation. Template syntax uses {gjson.path} placeholders
+  # interpolated from the Fleet host JSON. Literal text outside braces is
+  # preserved verbatim. Setting an empty string template means "let
+  # Snipe-IT auto-assign" (jamf2snipe's --auto_incrementing behavior).
+  asset_tag:
+    template: "fleet-{id}"
+    # Per-platform overrides (case-insensitive). Falls back to template above.
+    # platform_templates:
+    #   darwin: "MAC-{hardware_serial}"
+    #   ios: "iPhone-{hardware_serial}"
+    #   ipados: "iPad-{hardware_serial}"
+    #   windows: "PC-{hardware_serial}"
+
+  # Legacy shortcut: prepended to the host id when sync.asset_tag.template
+  # is unset. Equivalent to `template: "{prefix}{id}"`. Retained for older
+  # configs; new ones should use sync.asset_tag.template directly.
+  # asset_tag_prefix: "fleet-"
   # platform_filter: ["darwin", "windows"]  # only sync these platforms
 
   # Field mappings: Snipe-IT custom field db_column_name -> gjson path into the
