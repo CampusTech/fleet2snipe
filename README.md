@@ -218,6 +218,28 @@ snipe_it:
 
 `setup` writes every field to all of those fieldsets. You can then prune fields that don't apply per-platform inside Snipe-IT (e.g. remove `Fleet: Disk Encryption` from the Chrome fieldset).
 
+## Platform notes (osquery vs MDM)
+
+Fleet collects data differently depending on what's running on the host, so several mapping sources are **available only on osquery platforms**. Plan your fieldsets accordingly — per-platform `fieldset_ids` is the easiest way to keep iOS assets from being haunted by `Fleet: CPU Brand` columns that will never populate.
+
+| Platform           | Data source                              | What works                                                                                             | What's missing / thin                                                                                  |
+|--------------------|------------------------------------------|--------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------|
+| **darwin / linux / windows** | Fleet osquery agent            | Everything: full `field_mapping`, `policy_mapping`, `query_mapping`, `label_mapping`, software inventory | —                                                                                                      |
+| **chrome**         | `fleetd-chrome` browser extension        | Identity, MDM state, labels, **a subset** of osquery-style policies and saved queries via the extension's supported tables | Tables that don't exist in the extension's narrower osquery surface (most filesystem / kernel / `system_info` columns), software inventory, things like `cpu_brand`/`memory` that the extension doesn't expose |
+| **ios / ipados**   | Fleet MDM (no osquery, no extension)     | Hardware identity (serial / model / uuid), OS version, MDM enrollment state, labels via Smart criteria, end_users | `policy_mapping` (no osquery to evaluate), `query_mapping` (no osquery to run), software inventory, `cpu_brand`, `memory`, `gigs_*`, host-detail `disk_encryption_enabled` |
+| **android**        | Fleet MDM only (no osquery, no extension) | Same surface as iOS: identity, OS version, MDM enrollment, labels, end_users                            | Same gaps as iOS                                                                                       |
+| **tvos / visionos**| Fleet MDM only (no osquery)              | Same as iOS — basic identity only                                                                       | Same as iOS                                                                                            |
+
+**Practical implications**:
+
+- A `policy_mapping` entry for `"FileVault enabled"` will always return `""` on iOS/iPadOS hosts — Fleet has no way to evaluate it. The engine's "empty-on-missing" rule means the field stays blank rather than getting an incorrect `"fail"`.
+- `query_mapping` results only land for hosts that actually ran the query. iOS / Chrome hosts return no rows; the per-host lookup misses and the field stays blank.
+- Software-inventory–based mappings (`field_mapping` paths into `software[]`) are osquery-only. Enable `populate_software=true` and use them only on osquery platforms.
+- The `Fleet: Disk Encryption` field setup creates is meaningful on darwin/windows (osquery reads filevault/bitlocker state), partially populated on iOS via MDM (you get `mdm.disk_encryption_enabled` not the host-detail `disk_encryption_enabled`), and absent on Linux unless you wire up your own osquery extension or saved query.
+- Use `platform_filter` to skip platforms entirely if a sync run targets a specific tier (e.g. only push macOS into a "Laptop" category).
+
+The transforms (`bool_yes_no`, `bytes_to_gb`, etc.) all work uniformly regardless of platform — they operate on whatever value Fleet does return, including the empty case.
+
 ## Operating notes
 
 - **Match key**: `hardware_serial`. Hosts with no serial are skipped. Two Snipe-IT assets sharing a serial → flagged and skipped to avoid clobbering the wrong record.

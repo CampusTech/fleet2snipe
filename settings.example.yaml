@@ -94,6 +94,20 @@ sync:
   # Field mappings: Snipe-IT custom field db_column_name -> Fleet host data.
   # Run `fleet2snipe setup` once to auto-populate the bare-path entries.
   #
+  # NOTE on platform availability:
+  #   darwin/linux/windows — full Fleet osquery agent: everything works.
+  #   chrome               — fleetd-chrome extension (narrower osquery surface):
+  #                          identity + MDM + a subset of saved queries/policies.
+  #   ios/ipados/tvos/visionos/android — Fleet MDM only, NO osquery:
+  #                          identity + OS version + MDM state + labels only.
+  #                          policies, saved queries, software inventory, cpu_brand,
+  #                          memory, gigs_*, and host-detail disk_encryption_enabled
+  #                          all return blank.
+  # The engine writes "" rather than a wrong value for paths Fleet doesn't
+  # populate on a given platform, so global mappings can be left in place —
+  # they just no-op on platforms that can't supply the data. See README
+  # "Platform notes" for the full breakdown.
+  #
   # Each entry accepts two YAML shapes:
   #
   #   <db_column>: <gjson path>          (bare string — path only, no transform)
@@ -158,6 +172,9 @@ sync:
   # Policy mappings: Snipe-IT custom field db_column -> Fleet policy name.
   # Writes the host's pass/fail response into the field. populate_policies
   # is auto-enabled when this map is non-empty.
+  # NOTE: policies are evaluated by osquery, so they only return real
+  # results for darwin/linux/windows/chrome hosts. iOS family hosts will
+  # leave these fields blank.
   # policy_mapping:
   #   _snipeit_filevault_enabled_10: "FileVault is enabled"
   #   _snipeit_gatekeeper_11: "Gatekeeper is enabled"
@@ -166,6 +183,9 @@ sync:
   # result column. The saved query must have discard_data=false (i.e.
   # "Save results in Fleet" enabled). Fleet returns the most recent row
   # per host; we copy `column` from that row.
+  # NOTE: saved queries run via osquery, so only osquery platforms
+  # (darwin/linux/windows/chrome) return rows. iOS family hosts won't
+  # appear in the report at all.
   # query_mapping:
   #   _snipeit_kernel_version_12:
   #     query: "Kernel version"
