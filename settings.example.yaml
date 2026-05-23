@@ -205,6 +205,44 @@ sync:
   # comma-separated, alphabetised list of every label the host belongs to.
   # labels_field: _snipeit_fleet_labels_17
 
+  # Per-platform mapping overrides. Each entry merges with the corresponding
+  # global mapping above; on key collision the platform-specific value wins.
+  # Keys are lowercase platform strings (darwin, linux, windows, chrome, ios,
+  # ipados, android, tvos, visionos). All four mapping types are optional.
+  # See README "Platform notes" for what data sources are actually available
+  # per platform.
+  #
+  # per_platform:
+  #   darwin:
+  #     field_mapping:
+  #       _snipeit_filevault_method_20:
+  #         path: mdm.encryption_key_available
+  #         transform: bool_yes_no
+  #     policy_mapping:
+  #       _snipeit_compliance_21: "macOS baseline compliance"
+  #     query_mapping:
+  #       _snipeit_kernel_22:
+  #         query: "macOS kernel info"
+  #         column: "version"
+  #   windows:
+  #     policy_mapping:
+  #       _snipeit_bitlocker_23: "BitLocker enabled"
+  #   ios:
+  #     # iOS hosts have no osquery, so no policy/query mappings —
+  #     # add only fields Fleet's MDM surface actually populates.
+  #     field_mapping:
+  #       _snipeit_apple_uuid_24: uuid
+  #       _snipeit_supervised_25:
+  #         path: mdm.is_supervised
+  #         transform: bool_yes_no
+  #   chrome:
+  #     # fleetd-chrome supports a subset of osquery tables; some saved queries
+  #     # work, others don't. Keep query_mapping conservative.
+  #     field_mapping:
+  #       _snipeit_serial_upper_26:
+  #         path: hardware_serial
+  #         transform: uppercase
+
   # Checkout: assign the synced Snipe-IT asset to a Snipe-IT user based on
   # data Fleet reports about the host. Mirrors jamf2snipe's -u/-ui/-uf flags.
   # Disabled by default. When enabled, every Snipe-IT user is loaded once

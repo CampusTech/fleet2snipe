@@ -64,6 +64,124 @@ func TestFieldMappingEntry_MixedShapes(t *testing.T) {
 	}
 }
 
+func TestMergedFieldMapping(t *testing.T) {
+	cfg := SyncConfig{
+		FieldMapping: map[string]FieldMappingEntry{
+			"_snipeit_id_1": {Path: "id"},
+			"_snipeit_os_2": {Path: "os_version"},
+		},
+		PerPlatform: map[string]PlatformMappings{
+			"darwin": {
+				FieldMapping: map[string]FieldMappingEntry{
+					"_snipeit_fv_5": {Path: "host.disk_encryption_enabled", Transform: "bool_yes_no"},
+					"_snipeit_os_2": {Path: "os_version", Transform: "uppercase"}, // overrides global
+				},
+			},
+			"ios": {
+				FieldMapping: map[string]FieldMappingEntry{
+					"_snipeit_uuid_7": {Path: "uuid"},
+				},
+			},
+		},
+	}
+
+	t.Run("unknown platform returns global only", func(t *testing.T) {
+		m := cfg.MergedFieldMapping("freebsd")
+		if len(m) != 2 || m["_snipeit_id_1"].Path != "id" {
+			t.Errorf("got %+v", m)
+		}
+	})
+
+	t.Run("platform adds and overrides", func(t *testing.T) {
+		m := cfg.MergedFieldMapping("darwin")
+		if len(m) != 3 {
+			t.Errorf("expected 3 entries, got %d: %+v", len(m), m)
+		}
+		if m["_snipeit_os_2"].Transform != "uppercase" {
+			t.Errorf("platform override didn't win: %+v", m["_snipeit_os_2"])
+		}
+		if m["_snipeit_fv_5"].Path != "host.disk_encryption_enabled" {
+			t.Errorf("darwin field missing: %+v", m["_snipeit_fv_5"])
+		}
+	})
+
+	t.Run("case-insensitive platform key", func(t *testing.T) {
+		m := cfg.MergedFieldMapping("DARWIN")
+		if _, ok := m["_snipeit_fv_5"]; !ok {
+			t.Error("case-insensitive lookup failed")
+		}
+	})
+
+	t.Run("ios only sees ios overrides plus globals", func(t *testing.T) {
+		m := cfg.MergedFieldMapping("ios")
+		if _, ok := m["_snipeit_fv_5"]; ok {
+			t.Error("ios should not see darwin overrides")
+		}
+		if _, ok := m["_snipeit_uuid_7"]; !ok {
+			t.Error("ios override missing")
+		}
+		if m["_snipeit_os_2"].Transform != "" {
+			t.Error("ios should get global os_version, not darwin override")
+		}
+	})
+
+	t.Run("returned map is independent", func(t *testing.T) {
+		m := cfg.MergedFieldMapping("darwin")
+		m["_snipeit_id_1"] = FieldMappingEntry{Path: "tampered"}
+		if cfg.FieldMapping["_snipeit_id_1"].Path != "id" {
+			t.Error("caller mutation leaked into source config")
+		}
+	})
+}
+
+func TestAllQueryNames(t *testing.T) {
+	cfg := SyncConfig{
+		QueryMapping: map[string]QueryFieldMap{
+			"_a": {Query: "Global Query", Column: "x"},
+		},
+		PerPlatform: map[string]PlatformMappings{
+			"darwin": {QueryMapping: map[string]QueryFieldMap{
+				"_b": {Query: "Darwin Kernel", Column: "version"},
+				"_c": {Query: "Global Query", Column: "y"}, // duplicate of global
+			}},
+			"linux": {QueryMapping: map[string]QueryFieldMap{
+				"_d": {Query: "Linux Kernel", Column: "release"},
+			}},
+		},
+	}
+	names := cfg.AllQueryNames()
+	got := make(map[string]bool)
+	for _, n := range names {
+		got[n] = true
+	}
+	want := map[string]bool{"Global Query": true, "Darwin Kernel": true, "Linux Kernel": true}
+	if len(got) != len(want) {
+		t.Errorf("len mismatch: got %v, want %v", got, want)
+	}
+	for k := range want {
+		if !got[k] {
+			t.Errorf("missing %q in AllQueryNames", k)
+		}
+	}
+}
+
+func TestValidateFieldMappingTransforms_PerPlatform(t *testing.T) {
+	bad := &Config{Sync: SyncConfig{
+		PerPlatform: map[string]PlatformMappings{
+			"darwin": {FieldMapping: map[string]FieldMappingEntry{
+				"_snipeit_x_5": {Path: "p", Transform: "bogus_xform"},
+			}},
+		},
+	}}
+	err := bad.validateFieldMappingTransforms()
+	if err == nil {
+		t.Fatal("expected error for unknown per-platform transform")
+	}
+	if !strings.Contains(err.Error(), "bogus_xform") || !strings.Contains(err.Error(), "darwin") {
+		t.Errorf("error should name both transform and platform, got: %v", err)
+	}
+}
+
 func TestValidateFieldMappingTransforms(t *testing.T) {
 	good := &Config{Sync: SyncConfig{FieldMapping: map[string]FieldMappingEntry{
 		"_snipeit_a_1": {Path: "id"},

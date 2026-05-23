@@ -53,10 +53,12 @@ func runSync(cmd *cobra.Command, _ []string) error {
 
 	// Auto-enable populate_* on the list endpoint when their corresponding
 	// mappings are set — the sync engine can't read what Fleet doesn't return.
-	if len(Cfg.Sync.PolicyMapping) > 0 {
+	// Per-platform overrides count too: if a user only configures policies
+	// under per_platform.darwin, populate_policies still needs to be on.
+	if len(Cfg.Sync.PolicyMapping) > 0 || anyPerPlatformPolicies(Cfg) {
 		Cfg.Fleet.PopulatePolicies = true
 	}
-	if len(Cfg.Sync.LabelMapping) > 0 || Cfg.Sync.LabelsField != "" {
+	if len(Cfg.Sync.LabelMapping) > 0 || Cfg.Sync.LabelsField != "" || anyPerPlatformLabels(Cfg) {
 		Cfg.Fleet.PopulateLabels = true
 	}
 
@@ -156,6 +158,24 @@ func loadHosts(ctx context.Context, client *fleetapi.Client, cfg *config.Config)
 		}
 	}
 	return hosts, nil
+}
+
+func anyPerPlatformPolicies(cfg *config.Config) bool {
+	for _, pm := range cfg.Sync.PerPlatform {
+		if len(pm.PolicyMapping) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func anyPerPlatformLabels(cfg *config.Config) bool {
+	for _, pm := range cfg.Sync.PerPlatform {
+		if len(pm.LabelMapping) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func printStats(s f2sync.Stats) {

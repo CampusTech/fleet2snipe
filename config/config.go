@@ -98,6 +98,22 @@ type SyncConfig struct {
 	// Checkout configures user assignment of synced assets — same idea as
 	// jamf2snipe's -u/-ui/-uf flags but generalised across Fleet's user sources.
 	Checkout CheckoutConfig `yaml:"checkout"`
+	// PerPlatform overrides and extends the global mappings for hosts of a
+	// specific Fleet platform. Keys are lowercase platform strings (darwin,
+	// linux, windows, chrome, ios, ipados, android, tvos, visionos). Entries
+	// merge with the corresponding global mapping; on key collision the
+	// platform-specific value wins. See README "Platform notes" for which
+	// data sources are actually available per platform.
+	PerPlatform map[string]PlatformMappings `yaml:"per_platform"`
+}
+
+// PlatformMappings holds per-platform overrides for each mapping type.
+// All fields are optional; absent fields contribute nothing.
+type PlatformMappings struct {
+	FieldMapping  map[string]FieldMappingEntry `yaml:"field_mapping"`
+	PolicyMapping map[string]string            `yaml:"policy_mapping"`
+	QueryMapping  map[string]QueryFieldMap     `yaml:"query_mapping"`
+	LabelMapping  map[string]string            `yaml:"label_mapping"`
 }
 
 // CheckoutConfig controls assignment of Snipe-IT assets to users based on
@@ -269,15 +285,120 @@ func Load(path string) (*Config, error) {
 }
 
 // validateFieldMappingTransforms rejects unknown transform names at load time
-// so a typo is surfaced immediately rather than discovered per-host. Validation
-// runs once at startup, not in the sync hot path.
+// so a typo is surfaced immediately rather than discovered per-host. Both the
+// global field_mapping and every per-platform field_mapping are checked.
+// Validation runs once at startup, not in the sync hot path.
 func (c *Config) validateFieldMappingTransforms() error {
 	for col, entry := range c.Sync.FieldMapping {
 		if !validTransforms[entry.Transform] {
 			return fmt.Errorf("unknown transform %q in field_mapping[%s]: supported values are %v", entry.Transform, col, ValidTransformNames())
 		}
 	}
+	for platform, pm := range c.Sync.PerPlatform {
+		for col, entry := range pm.FieldMapping {
+			if !validTransforms[entry.Transform] {
+				return fmt.Errorf("unknown transform %q in per_platform[%s].field_mapping[%s]: supported values are %v", entry.Transform, platform, col, ValidTransformNames())
+			}
+		}
+	}
 	return nil
+}
+
+// MergedFieldMapping returns the global field_mapping union'd with the
+// per-platform overrides for the given platform. Platform-specific entries
+// win on key conflict. Platform matching is case-insensitive.
+func (c *SyncConfig) MergedFieldMapping(platform string) map[string]FieldMappingEntry {
+	out := make(map[string]FieldMappingEntry, len(c.FieldMapping))
+	for k, v := range c.FieldMapping {
+		out[k] = v
+	}
+	if pm, ok := c.lookupPlatform(platform); ok {
+		for k, v := range pm.FieldMapping {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// MergedPolicyMapping merges global + per-platform policy mappings.
+func (c *SyncConfig) MergedPolicyMapping(platform string) map[string]string {
+	out := make(map[string]string, len(c.PolicyMapping))
+	for k, v := range c.PolicyMapping {
+		out[k] = v
+	}
+	if pm, ok := c.lookupPlatform(platform); ok {
+		for k, v := range pm.PolicyMapping {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// MergedQueryMapping merges global + per-platform saved-query mappings.
+func (c *SyncConfig) MergedQueryMapping(platform string) map[string]QueryFieldMap {
+	out := make(map[string]QueryFieldMap, len(c.QueryMapping))
+	for k, v := range c.QueryMapping {
+		out[k] = v
+	}
+	if pm, ok := c.lookupPlatform(platform); ok {
+		for k, v := range pm.QueryMapping {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// MergedLabelMapping merges global + per-platform label mappings.
+func (c *SyncConfig) MergedLabelMapping(platform string) map[string]string {
+	out := make(map[string]string, len(c.LabelMapping))
+	for k, v := range c.LabelMapping {
+		out[k] = v
+	}
+	if pm, ok := c.lookupPlatform(platform); ok {
+		for k, v := range pm.LabelMapping {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// AllQueryNames returns every saved-query name referenced anywhere in the
+// query mappings (global + every per-platform block), deduped. Used by the
+// engine's warm-up to fetch each query's report exactly once regardless of
+// how many platforms reference it.
+func (c *SyncConfig) AllQueryNames() []string {
+	seen := make(map[string]struct{})
+	for _, qm := range c.QueryMapping {
+		if qm.Query != "" {
+			seen[qm.Query] = struct{}{}
+		}
+	}
+	for _, pm := range c.PerPlatform {
+		for _, qm := range pm.QueryMapping {
+			if qm.Query != "" {
+				seen[qm.Query] = struct{}{}
+			}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for n := range seen {
+		out = append(out, n)
+	}
+	return out
+}
+
+// lookupPlatform finds per-platform overrides by case-insensitive key.
+func (c *SyncConfig) lookupPlatform(platform string) (PlatformMappings, bool) {
+	p := strings.ToLower(strings.TrimSpace(platform))
+	if pm, ok := c.PerPlatform[p]; ok {
+		return pm, true
+	}
+	for k, v := range c.PerPlatform {
+		if strings.ToLower(k) == p {
+			return v, true
+		}
+	}
+	return PlatformMappings{}, false
 }
 
 // Validate checks that required fields are set for a full sync.

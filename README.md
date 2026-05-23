@@ -122,6 +122,40 @@ Full [gjson](https://github.com/tidwall/gjson) syntax (arrays, filters, modifier
 
 Unknown transform names are **rejected at config load** with an error naming both the bad transform and the field that used it — typos surface immediately rather than per-host.
 
+### Per-platform mapping overrides
+
+Every mapping section (`field_mapping`, `policy_mapping`, `query_mapping`, `label_mapping`) accepts per-platform additions and overrides under `sync.per_platform.<platform>.<mapping_type>`. The engine merges each platform's block with the corresponding global mapping for hosts of that platform; on key conflict the platform-specific value wins.
+
+```yaml
+sync:
+  field_mapping:
+    _snipeit_host_id_1: id              # global — applies to every platform
+
+  per_platform:
+    darwin:
+      field_mapping:
+        _snipeit_filevault_20:
+          path: disk_encryption_enabled
+          transform: bool_yes_no
+      policy_mapping:
+        _snipeit_compliance_21: "macOS baseline compliance"
+
+    ios:
+      # iOS has no osquery, so no policy/query mappings — just MDM-derived fields.
+      field_mapping:
+        _snipeit_supervised_24:
+          path: mdm.is_supervised
+          transform: bool_yes_no
+```
+
+**Resolution**: an iOS host gets `_snipeit_host_id_1` (from global) and `_snipeit_supervised_24` (from `per_platform.ios`); a darwin host gets `_snipeit_host_id_1` plus the FileVault field and policy.
+
+**Saved queries** referenced under `per_platform.<platform>.query_mapping` are fetched once per unique query name at warm time — referencing the same query from N platforms still costs one Fleet API call. The report is indexed by `host_id` so per-host lookups stay O(1) regardless of platform.
+
+**`populate_policies` / `populate_labels`** on the list endpoint are auto-enabled when *any* mapping (global or per-platform) needs the data, so you don't have to remember to flip the flag when adding a darwin-only policy.
+
+**Transform validation** runs on per-platform `field_mapping` entries too — typos in a platform block fail config load with a clear error naming both the platform and the transform name.
+
 ### 2. `policy_mapping` — Fleet policies (compliance "controls")
 
 ```yaml

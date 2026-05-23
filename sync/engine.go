@@ -72,10 +72,13 @@ type Engine struct {
 	manufacturers map[string]int  // hardware_vendor (lowercased) -> snipe manufacturer ID
 	stats         Stats
 
-	// queryResults[snipeDBColumn][hostID] = value. Populated during Warm by
-	// fetching the report for each saved query in cfg.Sync.QueryMapping once
-	// and turning it into a fast per-host lookup. Avoids one API call per host.
-	queryResults map[string]map[uint]string
+	// queryIDByName resolves saved query names to their Fleet IDs. Populated
+	// during Warm from the union of global + per-platform query mappings.
+	queryIDByName map[string]uint
+	// queryRows[queryID][hostID] = the result row's columns for that host.
+	// Pre-fetched once per unique saved query during Warm so per-host lookups
+	// stay O(1) regardless of platform or fleet size.
+	queryRows map[uint]map[uint]map[string]string
 
 	// usersByKey indexes Snipe-IT users by the configured MatchField, lowercased.
 	// Populated during Warm when cfg.Sync.Checkout.Enabled. Nil otherwise.
@@ -91,7 +94,8 @@ func NewEngine(f *fleetapi.Client, s *snipe.Client, cfg *config.Config) *Engine 
 		cfg:           cfg,
 		models:        make(map[string]int),
 		manufacturers: make(map[string]int),
-		queryResults:  make(map[string]map[uint]string),
+		queryIDByName: make(map[string]uint),
+		queryRows:     make(map[uint]map[uint]map[string]string),
 	}
 }
 
@@ -188,10 +192,14 @@ func (e *Engine) loadUsers(ctx context.Context) error {
 	return nil
 }
 
-// loadQueryReports resolves each configured query name to an ID, fetches its
-// report once, and indexes the result by host_id so SyncHost can do O(1) lookups.
+// loadQueryReports resolves every saved-query name referenced across global
+// and per-platform query_mappings, fetches each report exactly once, and
+// indexes the result by host_id. Per-host application reads queryRows
+// directly so a single global query referenced by N platforms still costs
+// one Fleet API call.
 func (e *Engine) loadQueryReports(ctx context.Context) error {
-	if len(e.cfg.Sync.QueryMapping) == 0 || e.fleet == nil {
+	names := e.cfg.Sync.AllQueryNames()
+	if len(names) == 0 || e.fleet == nil {
 		return nil
 	}
 	queries, err := e.fleet.ListQueries(ctx)
@@ -202,29 +210,24 @@ func (e *Engine) loadQueryReports(ctx context.Context) error {
 	for _, q := range queries {
 		idByName[q.Name] = q.ID
 	}
-	for dbCol, qm := range e.cfg.Sync.QueryMapping {
-		if qm.Query == "" || qm.Column == "" {
-			log.WithField("db_column", dbCol).Warn("query_mapping entry missing query or column, skipping")
-			continue
-		}
-		qid, ok := idByName[qm.Query]
+	for _, name := range names {
+		qid, ok := idByName[name]
 		if !ok {
-			log.WithFields(logrus.Fields{"db_column": dbCol, "query": qm.Query}).Warn("saved query not found in Fleet, skipping mapping")
+			log.WithField("query", name).Warn("saved query not found in Fleet, skipping")
 			continue
 		}
+		e.queryIDByName[name] = qid
 		rows, err := e.fleet.QueryReport(ctx, qid)
 		if err != nil {
-			log.WithError(err).WithField("query", qm.Query).Warn("could not fetch query report")
+			log.WithError(err).WithField("query", name).Warn("could not fetch query report")
 			continue
 		}
-		hostLookup := make(map[uint]string, len(rows))
+		byHost := make(map[uint]map[string]string, len(rows))
 		for _, r := range rows {
-			if v, ok := r.Columns[qm.Column]; ok && v != "" {
-				hostLookup[r.HostID] = v
-			}
+			byHost[r.HostID] = r.Columns
 		}
-		e.queryResults[dbCol] = hostLookup
-		log.WithFields(logrus.Fields{"query": qm.Query, "column": qm.Column, "hosts": len(hostLookup)}).Info("indexed saved-query report")
+		e.queryRows[qid] = byHost
+		log.WithFields(logrus.Fields{"query": name, "hosts": len(byHost)}).Info("indexed saved-query report")
 	}
 	return nil
 }
@@ -608,20 +611,25 @@ func preferredName(h fleetapi.Host) string {
 }
 
 // applyMapping evaluates every configured source against a host and returns
-// the merged Snipe-IT custom_field DB column -> value map. Sources:
-//   - sync.field_mapping: gjson paths into the host JSON
-//   - sync.policy_mapping: pass/fail response from a named Fleet policy
-//   - sync.query_mapping:  a column from the host's row in a saved query's report
-//   - sync.label_mapping:  "yes"/"no" depending on host membership in a named label
-//   - sync.labels_field:   comma-separated list of every label the host belongs to
+// the merged Snipe-IT custom_field DB column -> value map. Each mapping type
+// pulls the union of its global config plus any per-platform overrides for
+// the host's platform, so iOS hosts only see iOS-relevant mappings, etc.
+//
+// Sources:
+//   - sync.field_mapping(+per_platform): gjson paths into the host JSON
+//   - sync.policy_mapping(+per_platform): pass/fail response from a named Fleet policy
+//   - sync.query_mapping(+per_platform):  a column from the host's row in a saved query's report
+//   - sync.label_mapping(+per_platform):  "yes"/"no" depending on host membership in a named label
+//   - sync.labels_field:                  comma-separated list of every label the host belongs to
 //
 // Empty / missing values are skipped so we never overwrite Snipe data with "".
 func (e *Engine) applyMapping(h fleetapi.Host) map[string]string {
 	out := make(map[string]string)
 
-	if len(e.cfg.Sync.FieldMapping) > 0 && len(h.Raw) > 0 {
+	fieldMap := e.cfg.Sync.MergedFieldMapping(h.Platform)
+	if len(fieldMap) > 0 && len(h.Raw) > 0 {
 		root := gjson.ParseBytes(h.Raw)
-		for dbCol, entry := range e.cfg.Sync.FieldMapping {
+		for dbCol, entry := range fieldMap {
 			if dbCol == "" || entry.Path == "" {
 				continue
 			}
@@ -635,7 +643,7 @@ func (e *Engine) applyMapping(h fleetapi.Host) map[string]string {
 		}
 	}
 
-	for dbCol, policyName := range e.cfg.Sync.PolicyMapping {
+	for dbCol, policyName := range e.cfg.Sync.MergedPolicyMapping(h.Platform) {
 		if dbCol == "" || policyName == "" {
 			continue
 		}
@@ -644,20 +652,31 @@ func (e *Engine) applyMapping(h fleetapi.Host) map[string]string {
 		}
 	}
 
-	for dbCol := range e.cfg.Sync.QueryMapping {
-		if v, ok := e.queryResults[dbCol][h.ID]; ok && v != "" {
+	for dbCol, qm := range e.cfg.Sync.MergedQueryMapping(h.Platform) {
+		if qm.Query == "" || qm.Column == "" {
+			continue
+		}
+		qid, ok := e.queryIDByName[qm.Query]
+		if !ok {
+			continue
+		}
+		cols, ok := e.queryRows[qid][h.ID]
+		if !ok {
+			continue
+		}
+		if v, ok := cols[qm.Column]; ok && v != "" {
 			out[dbCol] = v
 		}
 	}
 
-	if len(e.cfg.Sync.LabelMapping) > 0 {
+	if labelMap := e.cfg.Sync.MergedLabelMapping(h.Platform); len(labelMap) > 0 {
 		// Lowercased name set for O(1) per-label membership checks; built once
 		// per host rather than O(N*M) nested loops on big label sets.
 		set := make(map[string]struct{}, len(h.Labels))
 		for _, l := range h.Labels {
 			set[strings.ToLower(l.Name)] = struct{}{}
 		}
-		for dbCol, labelName := range e.cfg.Sync.LabelMapping {
+		for dbCol, labelName := range labelMap {
 			if dbCol == "" || labelName == "" {
 				continue
 			}
