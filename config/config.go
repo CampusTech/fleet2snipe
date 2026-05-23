@@ -139,11 +139,14 @@ type CheckoutConfig struct {
 	Mode string `yaml:"mode"`
 }
 
-// QueryFieldMap names a saved Fleet query and the result column to copy
-// into a Snipe-IT custom field.
+// QueryFieldMap names a saved Fleet query, the column to extract from the
+// result row, and an optional transform to apply before the value lands in
+// Snipe-IT. Transform names are the same ones field_mapping accepts and are
+// validated at config load.
 type QueryFieldMap struct {
-	Query  string `yaml:"query"`  // saved query name (resolved to ID at warm time)
-	Column string `yaml:"column"` // result column from the row Fleet returns
+	Query     string `yaml:"query"`     // saved query name (resolved to ID at warm time)
+	Column    string `yaml:"column"`    // result column from the row Fleet returns
+	Transform string `yaml:"transform"` // optional value transform (e.g. base64_to_mac)
 }
 
 // FieldMappingEntry is the value side of sync.field_mapping. It accepts two
@@ -200,10 +203,11 @@ var validTransforms = map[string]bool{
 	"unix_to_iso": true,
 
 	// String
-	"uppercase":  true,
-	"lowercase":  true,
-	"mac_colons": true,
-	"mac_dashes": true,
+	"uppercase":     true,
+	"lowercase":     true,
+	"mac_colons":    true,
+	"mac_dashes":    true,
+	"base64_to_mac": true,
 
 	// Display helpers
 	"comma_thousands": true,
@@ -298,18 +302,28 @@ func Load(path string) (*Config, error) {
 
 // validateFieldMappingTransforms rejects unknown transform names at load time
 // so a typo is surfaced immediately rather than discovered per-host. Both the
-// global field_mapping and every per-platform field_mapping are checked.
-// Validation runs once at startup, not in the sync hot path.
+// global field_mapping and every per-platform field_mapping/query_mapping are
+// checked. Validation runs once at startup, not in the sync hot path.
 func (c *Config) validateFieldMappingTransforms() error {
 	for col, entry := range c.Sync.FieldMapping {
 		if !validTransforms[entry.Transform] {
 			return fmt.Errorf("unknown transform %q in field_mapping[%s]: supported values are %v", entry.Transform, col, ValidTransformNames())
 		}
 	}
+	for col, entry := range c.Sync.QueryMapping {
+		if !validTransforms[entry.Transform] {
+			return fmt.Errorf("unknown transform %q in query_mapping[%s]: supported values are %v", entry.Transform, col, ValidTransformNames())
+		}
+	}
 	for platform, pm := range c.Sync.PerPlatform {
 		for col, entry := range pm.FieldMapping {
 			if !validTransforms[entry.Transform] {
 				return fmt.Errorf("unknown transform %q in per_platform[%s].field_mapping[%s]: supported values are %v", entry.Transform, platform, col, ValidTransformNames())
+			}
+		}
+		for col, entry := range pm.QueryMapping {
+			if !validTransforms[entry.Transform] {
+				return fmt.Errorf("unknown transform %q in per_platform[%s].query_mapping[%s]: supported values are %v", entry.Transform, platform, col, ValidTransformNames())
 			}
 		}
 	}

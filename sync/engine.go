@@ -5,6 +5,7 @@ package sync
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -665,7 +666,12 @@ func (e *Engine) applyMapping(h fleetapi.Host) map[string]string {
 			continue
 		}
 		if v, ok := cols[qm.Column]; ok && v != "" {
-			out[dbCol] = v
+			if qm.Transform != "" {
+				v = transformString(v, qm.Transform)
+			}
+			if v != "" {
+				out[dbCol] = v
+			}
 		}
 	}
 
@@ -808,6 +814,18 @@ func transformValue(r gjson.Result, transform string) string {
 		return normalizeMAC(r.String(), ":")
 	case "mac_dashes":
 		return normalizeMAC(r.String(), "-")
+	case "base64_to_mac":
+		// Decode 6 base64 bytes into a lowercase colon-separated MAC. Used for
+		// Fleet's ioreg table on macOS, which surfaces IOMACAddress as a plist
+		// <data> block — e.g. "cIzyxNK1" → "70:8c:f2:c4:d2:b5". The trimmed
+		// gjson value is base64-decoded; anything that doesn't yield exactly
+		// 6 bytes returns "" so partial / corrupt rows can't write a half MAC.
+		raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(r.String()))
+		if err != nil || len(raw) != 6 {
+			return ""
+		}
+		return fmt.Sprintf("%02x:%02x:%02x:%02x:%02x:%02x",
+			raw[0], raw[1], raw[2], raw[3], raw[4], raw[5])
 
 	// --- Display helpers ---
 
@@ -854,6 +872,32 @@ func transformValue(r gjson.Result, transform string) string {
 		// before we get here — but fall back to raw rather than dropping data.
 		return stringifyGJSON(r)
 	}
+}
+
+// transformString runs a transform against a bare string value (e.g. a saved
+// query column, which always arrives as a string regardless of the underlying
+// osquery column type). For numeric transforms (bytes_to_*, gib_to_gb,
+// unix_to_iso, comma_thousands) we reparse the string as a JSON number first
+// so r.Int() / r.Float() can pick it up; non-numeric strings fall through to
+// the string-typed transforms.
+func transformString(s, transform string) string {
+	if transform == "" {
+		return s
+	}
+	var raw []byte
+	if _, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64); err == nil {
+		raw = []byte(strings.TrimSpace(s))
+	} else if _, err := strconv.ParseFloat(strings.TrimSpace(s), 64); err == nil {
+		raw = []byte(strings.TrimSpace(s))
+	} else {
+		// Encode as JSON string so gjson sees Type=String.
+		encoded, err := json.Marshal(s)
+		if err != nil {
+			return s
+		}
+		raw = encoded
+	}
+	return transformValue(gjson.ParseBytes(raw), transform)
 }
 
 // normalizeMAC strips every non-hex character from s, then re-inserts sep

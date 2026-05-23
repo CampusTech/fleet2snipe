@@ -186,6 +186,9 @@ sync:
   # NOTE: saved queries run via osquery, so only osquery platforms
   # (darwin/linux/windows/chrome) return rows. iOS family hosts won't
   # appear in the report at all.
+  # An optional `transform` runs the same value transforms field_mapping
+  # supports against the column value before write — useful when a query
+  # returns base64 bytes (e.g. ioreg IOMACAddress) or numeric strings.
   # query_mapping:
   #   _snipeit_kernel_version_12:
   #     query: "Kernel version"
@@ -193,6 +196,10 @@ sync:
   #   _snipeit_active_directory_domain_13:
   #     query: "Joined AD domain"
   #     column: "domain"
+  #   _snipeit_mac_address_1:
+  #     query: "macOS hardware Wi-Fi MAC"
+  #     column: "mac_b64"
+  #     transform: base64_to_mac        # ioreg IOMACAddress → aa:bb:cc:dd:ee:ff
 
   # Label mappings: Snipe-IT custom field db_column -> Fleet label name.
   # Field is set to "yes" if the host belongs to the label, "no" otherwise.

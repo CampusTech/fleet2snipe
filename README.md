@@ -114,6 +114,7 @@ Full [gjson](https://github.com/tidwall/gjson) syntax (arrays, filters, modifier
 |                 | `lowercase`       | any string                  | `strings.ToLower`                                                    |
 |                 | `mac_colons`      | any MAC-ish string          | `aa:bb:cc:dd:ee:ff` (colon-separated, lowercase)                     |
 |                 | `mac_dashes`      | any MAC-ish string          | `aa-bb-cc-dd-ee-ff` (dash-separated, lowercase)                      |
+|                 | `base64_to_mac`   | 6-byte base64 string        | `aa:bb:cc:dd:ee:ff` — decodes Fleet's ioreg `IOMACAddress` plist data |
 | Display         | `comma_thousands` | integer (or numeric string) | `1,234,567` US-style thousands grouping                              |
 |                 | `bool_yes_no`     | bool / numeric / string     | `Yes` / `No` for true-ish / false-ish; `""` for unknown values       |
 
@@ -182,6 +183,41 @@ sync:
 ```
 
 The saved query must have **discard_data=false** (i.e. "Save results in Fleet"). Each configured query is fetched **once per sync run** and indexed by `host_id` — a 5,000-host fleet with three query mappings costs 3 API calls, not 15,000.
+
+#### Recipe: hardware Wi-Fi MAC on macOS (sidesteps Private Wi-Fi Address)
+
+The default `primary_mac` Fleet returns for macOS hosts is the **Private Wi-Fi Address** — a per-SSID randomized MAC the OS rotates whenever the host joins a new network. For stable inventory tracking you want the burned-in hardware MAC instead.
+
+Fleet's `fleetd` agent ships an `ioreg` osquery table that wraps `/usr/sbin/ioreg -a` and surfaces IOKit properties — including `IOMACAddress` on the underlying Wi-Fi adapter, which bypasses Private Wi-Fi Address because IOKit sits below the kernel's MAC-rewriting layer.
+
+**Step 1** — in Fleet, create a saved query (Settings → Queries → Add) named e.g. `"macOS hardware Wi-Fi MAC"` with **Save results in Fleet** enabled:
+
+```sql
+SELECT value AS mac_b64
+FROM ioreg
+WHERE c = 'IOSkywalkLegacyEthernet'  -- macOS 12+ Wi-Fi adapter class
+  AND key = 'IOMACAddress'
+LIMIT 1;
+```
+
+(Pre-macOS-12 systems use `AppleBCMWLANCore` or `IO80211Controller`. Widen the `c =` filter if you need to support older versions.)
+
+**Step 2** — in fleet2snipe, wire it up under the darwin platform with the `base64_to_mac` transform. ioreg surfaces `IOMACAddress` as a plist `<data>` block which fleetd serialises as base64; `base64_to_mac` decodes 6 bytes into `aa:bb:cc:dd:ee:ff`:
+
+```yaml
+sync:
+  per_platform:
+    darwin:
+      query_mapping:
+        _snipeit_mac_address_1:
+          query: "macOS hardware Wi-Fi MAC"
+          column: "mac_b64"
+          transform: base64_to_mac    # "cIzyxNK1" → 70:8c:f2:c4:d2:b5
+```
+
+Fleet has to have collected the query result for at least one interval before the first sync sees data. After that, the hardware MAC overrides the rotating `primary_mac` for darwin hosts and stays stable across SSID changes.
+
+Tracking upstream: this is filed as a Fleet bug at <https://github.com/fleetdm/fleet/issues/46112>. When Fleet adds a stable `hardware_mac` field, this recipe goes away.
 
 ### 4. `label_mapping` — per-label membership
 

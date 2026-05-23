@@ -73,6 +73,16 @@ func TestTransformValue(t *testing.T) {
 		{"lowercase", `{"v": "Hello-World"}`, "lowercase", "hello-world"},
 		{"lowercase non-string number", `{"v": 42}`, "lowercase", "42"},
 
+		// base64_to_mac (Fleet ioreg IOMACAddress plist <data>)
+		{"base64_to_mac real macOS sample", `{"v": "cIzyxNK1"}`, "base64_to_mac", "70:8c:f2:c4:d2:b5"},
+		{"base64_to_mac all zeros", `{"v": "AAAAAAAA"}`, "base64_to_mac", "00:00:00:00:00:00"},
+		{"base64_to_mac empty", `{"v": ""}`, "base64_to_mac", ""},
+		{"base64_to_mac too few bytes", `{"v": "AAAA"}`, "base64_to_mac", ""}, // 3 bytes
+		{"base64_to_mac too many bytes", `{"v": "AAAAAAAAAAAA"}`, "base64_to_mac", ""}, // 9 bytes
+		{"base64_to_mac not base64", `{"v": "not!base64@@"}`, "base64_to_mac", ""},
+		{"base64_to_mac missing", `{"x": "cIzyxNK1"}`, "base64_to_mac", ""},
+		{"base64_to_mac whitespace tolerated", `{"v": "  cIzyxNK1  "}`, "base64_to_mac", "70:8c:f2:c4:d2:b5"},
+
 		// mac_colons / mac_dashes
 		{"mac_colons from dashes", `{"v": "AA-BB-CC-DD-EE-FF"}`, "mac_colons", "aa:bb:cc:dd:ee:ff"},
 		{"mac_colons from colons", `{"v": "aa:bb:cc:dd:ee:ff"}`, "mac_colons", "aa:bb:cc:dd:ee:ff"},
@@ -115,6 +125,33 @@ func TestTransformValue(t *testing.T) {
 			got := transformValue(res, c.transform)
 			if got != c.want {
 				t.Errorf("transformValue(%q, %q) = %q, want %q", c.json, c.transform, got, c.want)
+			}
+		})
+	}
+}
+
+// TestTransformString exercises the string-input adaptor used by query_mapping.
+// Saved query columns always arrive as strings; the adaptor reparses numeric
+// strings as JSON numbers so numeric transforms still work.
+func TestTransformString(t *testing.T) {
+	cases := []struct {
+		name, in, transform, want string
+	}{
+		{"no transform passes through", "anything", "", "anything"},
+		{"base64_to_mac on string", "cIzyxNK1", "base64_to_mac", "70:8c:f2:c4:d2:b5"},
+		{"uppercase on string", "abc", "uppercase", "ABC"},
+		{"bytes_to_gib on numeric string", "17179869184", "bytes_to_gib", "16"},
+		{"unix_to_iso on numeric string", "1700000000", "unix_to_iso", "2023-11-14 22:13:20"},
+		{"bool_yes_no on string true", "true", "bool_yes_no", "Yes"},
+		{"comma_thousands on numeric string", "1234567", "comma_thousands", "1,234,567"},
+		{"mac_colons on string", "AA-BB-CC-DD-EE-FF", "mac_colons", "aa:bb:cc:dd:ee:ff"},
+		{"empty input", "", "uppercase", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := transformString(c.in, c.transform)
+			if got != c.want {
+				t.Errorf("transformString(%q, %q) = %q, want %q", c.in, c.transform, got, c.want)
 			}
 		})
 	}
