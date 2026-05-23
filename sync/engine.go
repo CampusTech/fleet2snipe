@@ -36,13 +36,15 @@ func SetLogOutput(w io.Writer) { log.SetOutput(w) }
 
 // Stats tracks per-run counts.
 type Stats struct {
-	Total            int
-	Created          int
-	Updated          int
-	Skipped          int
-	Errors           int
-	ModelsCreated    int
-	ManufacturersNew int
+	Total              int
+	Created            int
+	Updated            int
+	Skipped            int
+	Errors             int
+	ModelsCreated      int
+	ManufacturersNew   int
+	CheckoutsApplied   int
+	CheckoutsSkipped   int
 }
 
 // Add merges other into s.
@@ -54,6 +56,8 @@ func (s *Stats) Add(other Stats) {
 	s.Errors += other.Errors
 	s.ModelsCreated += other.ModelsCreated
 	s.ManufacturersNew += other.ManufacturersNew
+	s.CheckoutsApplied += other.CheckoutsApplied
+	s.CheckoutsSkipped += other.CheckoutsSkipped
 }
 
 // Engine reconciles Fleet hosts into Snipe-IT assets.
@@ -70,6 +74,10 @@ type Engine struct {
 	// fetching the report for each saved query in cfg.Sync.QueryMapping once
 	// and turning it into a fast per-host lookup. Avoids one API call per host.
 	queryResults map[string]map[uint]string
+
+	// usersByKey indexes Snipe-IT users by the configured MatchField, lowercased.
+	// Populated during Warm when cfg.Sync.Checkout.Enabled. Nil otherwise.
+	usersByKey map[string]int
 }
 
 // NewEngine constructs an Engine. The Fleet client may be nil if all hosts
@@ -131,6 +139,50 @@ func (e *Engine) Warm(ctx context.Context) error {
 		// those fields blank rather than aborting the whole sync.
 		log.WithError(err).Warn("could not pre-fetch saved-query reports; query_mapping fields will be empty")
 	}
+
+	if e.cfg.Sync.Checkout.Enabled {
+		if err := e.loadUsers(ctx); err != nil {
+			log.WithError(err).Warn("could not load Snipe-IT users; checkout will be skipped for this run")
+		}
+	}
+	return nil
+}
+
+// loadUsers pages every Snipe-IT user and indexes them by the configured
+// match field. The lowercased key makes lookups case-insensitive (Fleet's
+// usernames and Snipe-IT's often disagree on casing for the same person).
+func (e *Engine) loadUsers(ctx context.Context) error {
+	users, err := e.snipe.ListAllUsers(ctx)
+	if err != nil {
+		return fmt.Errorf("listing users: %w", err)
+	}
+	matchField := strings.ToLower(strings.TrimSpace(e.cfg.Sync.Checkout.MatchField))
+	if matchField == "" {
+		matchField = "username"
+	}
+	idx := make(map[string]int, len(users))
+	for _, u := range users {
+		if !u.Activated {
+			continue
+		}
+		var key string
+		switch matchField {
+		case "email":
+			key = u.Email
+		case "employee_num":
+			key = u.Employee
+		case "username":
+			key = u.Username
+		default:
+			return fmt.Errorf("invalid checkout.match_field %q (expected username, email, or employee_num)", matchField)
+		}
+		if key == "" {
+			continue
+		}
+		idx[strings.ToLower(strings.TrimSpace(key))] = u.ID
+	}
+	e.usersByKey = idx
+	log.WithFields(logrus.Fields{"count": len(idx), "match_field": matchField}).Info("indexed snipe-it users for checkout")
 	return nil
 }
 
@@ -290,6 +342,9 @@ func (e *Engine) create(ctx context.Context, h fleetapi.Host, logger *logrus.Ent
 	}
 	logger.WithFields(logrus.Fields{"snipe_id": created.ID, "asset_tag": created.AssetTag}).Info("created asset")
 	e.stats.Created++
+	// A freshly created asset has no assignment, so we don't need the current
+	// user — pass 0 for that arg.
+	e.applyCheckout(ctx, h, *created, 0, logger)
 	return nil
 }
 
@@ -334,9 +389,17 @@ func (e *Engine) update(ctx context.Context, h fleetapi.Host, existing snipeit.A
 		}
 	}
 
+	currentUserID := 0
+	if existing.User != nil {
+		currentUserID = existing.User.ID
+	}
+
 	if !changed {
-		logger.Debug("no changes")
+		logger.Debug("no field changes")
 		e.stats.Skipped++
+		// Even when no field changes, the user assignment can still need work
+		// (someone left the company, MDM reassigned the device, etc.).
+		e.applyCheckout(ctx, h, existing, currentUserID, logger)
 		return nil
 	}
 
@@ -355,7 +418,94 @@ func (e *Engine) update(ctx context.Context, h fleetapi.Host, existing snipeit.A
 	}
 	logger.WithField("snipe_id", existing.ID).Info("updated asset")
 	e.stats.Updated++
+	e.applyCheckout(ctx, h, existing, currentUserID, logger)
 	return nil
+}
+
+// applyCheckout looks at the configured user field on the Fleet host, finds
+// the matching Snipe-IT user, and adjusts the asset's assignment per mode.
+// All failures are logged and absorbed — never block sync progress on checkout.
+func (e *Engine) applyCheckout(ctx context.Context, h fleetapi.Host, asset snipeit.Asset, currentUserID int, logger *logrus.Entry) {
+	if !e.cfg.Sync.Checkout.Enabled || e.usersByKey == nil {
+		return
+	}
+	if e.cfg.Sync.Checkout.UserField == "" {
+		return
+	}
+	if asset.ID == 0 {
+		// Dry-run or create that didn't return an id — nothing to act on.
+		return
+	}
+
+	rawKey := extractCheckoutKey(h.Raw, e.cfg.Sync.Checkout.UserField)
+	if rawKey == "" {
+		logger.Debug("no user identifier on host; leaving checkout untouched")
+		e.stats.CheckoutsSkipped++
+		return
+	}
+
+	desiredID, ok := e.usersByKey[strings.ToLower(strings.TrimSpace(rawKey))]
+	if !ok {
+		logger.WithField("user_key", rawKey).Info("Fleet user not found in Snipe-IT; skipping checkout")
+		e.stats.CheckoutsSkipped++
+		return
+	}
+
+	mode := strings.ToLower(strings.TrimSpace(e.cfg.Sync.Checkout.Mode))
+	if mode == "" {
+		mode = "assign"
+	}
+
+	switch {
+	case currentUserID == desiredID && mode != "force":
+		// Already correct. Nothing to do.
+		return
+	case currentUserID != 0 && mode == "assign":
+		logger.WithFields(logrus.Fields{
+			"current_user_id": currentUserID,
+			"desired_user_id": desiredID,
+			"mode":            mode,
+		}).Debug("asset already assigned; mode=assign so leaving alone")
+		e.stats.CheckoutsSkipped++
+		return
+	}
+
+	if e.cfg.Sync.DryRun {
+		logger.WithFields(logrus.Fields{"snipe_id": asset.ID, "user_id": desiredID, "user_key": rawKey}).Info("[DRY RUN] would check out asset")
+		e.stats.CheckoutsApplied++
+		return
+	}
+
+	// Snipe-IT's checkout endpoint refuses to overwrite an existing assignment.
+	// Check the asset in first when reassigning.
+	if currentUserID != 0 && currentUserID != desiredID {
+		if err := e.snipe.CheckinAsset(ctx, asset.ID); err != nil {
+			logger.WithError(err).Warn("could not check in asset before reassign")
+			e.stats.Errors++
+			return
+		}
+	}
+
+	if err := e.snipe.CheckoutAssetToUser(ctx, asset.ID, desiredID); err != nil {
+		logger.WithError(err).WithFields(logrus.Fields{"snipe_id": asset.ID, "user_id": desiredID}).Warn("checkout failed")
+		e.stats.Errors++
+		return
+	}
+	logger.WithFields(logrus.Fields{"snipe_id": asset.ID, "user_id": desiredID, "user_key": rawKey}).Info("checked out asset to user")
+	e.stats.CheckoutsApplied++
+}
+
+// extractCheckoutKey evaluates a gjson path against the host's raw JSON.
+// Returns the trimmed string value, or "" if the path is missing/empty.
+func extractCheckoutKey(raw []byte, path string) string {
+	if len(raw) == 0 || path == "" {
+		return ""
+	}
+	res := gjson.GetBytes(raw, path)
+	if !res.Exists() {
+		return ""
+	}
+	return strings.TrimSpace(res.String())
 }
 
 // assetTag returns the asset tag to use when creating a new asset.

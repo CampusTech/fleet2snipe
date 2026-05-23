@@ -102,6 +102,67 @@ func (c *Client) CreateModel(ctx context.Context, m snipeit.Model) (*snipeit.Mod
 	return &resp.Payload, nil
 }
 
+// ListAllUsers pages through every Snipe-IT user.
+func (c *Client) ListAllUsers(ctx context.Context) ([]snipeit.User, error) {
+	var all []snipeit.User
+	offset := 0
+	const limit = 500
+	for {
+		resp, _, err := c.Users.ListContext(ctx, &snipeit.ListOptions{Limit: limit, Offset: offset})
+		if err != nil {
+			return nil, fmt.Errorf("listing users: %w", err)
+		}
+		all = append(all, resp.Rows...)
+		if len(all) >= resp.Total {
+			break
+		}
+		offset += limit
+	}
+	return all, nil
+}
+
+// CheckoutAssetToUser checks an asset out to a Snipe-IT user. Errors if the
+// asset is already checked out — call CheckinAsset first if reassigning.
+func (c *Client) CheckoutAssetToUser(ctx context.Context, assetID, userID int) error {
+	if c.DryRun {
+		return ErrDryRun
+	}
+	body := map[string]any{
+		"checkout_to_type": "user",
+		"assigned_user":    userID,
+	}
+	resp, _, err := c.Assets.CheckoutContext(ctx, assetID, body)
+	if err != nil {
+		return fmt.Errorf("checking out asset %d to user %d: %w", assetID, userID, err)
+	}
+	if resp.Status != "success" {
+		return fmt.Errorf("checking out asset %d to user %d: %s", assetID, userID, resp.Message)
+	}
+	return nil
+}
+
+// CheckinAsset returns a checked-out asset back to its base state. Safe to call
+// on an asset that isn't currently checked out (Snipe-IT returns a soft error
+// which we treat as success).
+func (c *Client) CheckinAsset(ctx context.Context, assetID int) error {
+	if c.DryRun {
+		return ErrDryRun
+	}
+	resp, _, err := c.Assets.CheckinContext(ctx, assetID, map[string]any{})
+	if err != nil {
+		return fmt.Errorf("checking in asset %d: %w", assetID, err)
+	}
+	if resp.Status != "success" {
+		// "That asset is not checked out to anyone, please use the request endpoint"
+		// is fine — we wanted it unassigned and it already is.
+		if strings.Contains(strings.ToLower(string(resp.Message)), "not checked out") {
+			return nil
+		}
+		return fmt.Errorf("checking in asset %d: %s", assetID, resp.Message)
+	}
+	return nil
+}
+
 // ListAllManufacturers pages through every manufacturer.
 func (c *Client) ListAllManufacturers(ctx context.Context) ([]snipeit.Manufacturer, error) {
 	var all []snipeit.Manufacturer

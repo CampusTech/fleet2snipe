@@ -93,6 +93,30 @@ type SyncConfig struct {
 	// receives a comma-separated list of every label name the host belongs to.
 	// populate_labels is auto-enabled when this is non-empty.
 	LabelsField string `yaml:"labels_field"`
+	// Checkout configures user assignment of synced assets — same idea as
+	// jamf2snipe's -u/-ui/-uf flags but generalised across Fleet's user sources.
+	Checkout CheckoutConfig `yaml:"checkout"`
+}
+
+// CheckoutConfig controls assignment of Snipe-IT assets to users based on
+// data Fleet reports about each host.
+type CheckoutConfig struct {
+	// Enabled turns the whole feature on. Off by default — no user lookups
+	// happen at all when false.
+	Enabled bool `yaml:"enabled"`
+	// UserField is a gjson path into the host JSON that extracts the user
+	// identifier (e.g. "end_users.0.idp_username" for Fleet Premium with IDP,
+	// or "users.#(type==\"regular\").username" for the first regular OS user).
+	// The extracted value is matched against MatchField in Snipe-IT.
+	UserField string `yaml:"user_field"`
+	// MatchField is the Snipe-IT user field to match against: "username",
+	// "email", or "employee_num". Defaults to "username".
+	MatchField string `yaml:"match_field"`
+	// Mode controls when to act on a discovered user, mirroring jamf2snipe:
+	//   assign  — only checkout if currently unassigned (default; like -u)
+	//   sync    — also reassign when the current user differs (like -ui)
+	//   force   — always (re)assign even if it matches (like -uf)
+	Mode string `yaml:"mode"`
 }
 
 // QueryFieldMap names a saved Fleet query and the result column to copy

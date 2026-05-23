@@ -112,6 +112,27 @@ sync:
   # comma-separated, alphabetised list of every label the host belongs to.
   # labels_field: _snipeit_fleet_labels_17
 
+  # Checkout: assign the synced Snipe-IT asset to a Snipe-IT user based on
+  # data Fleet reports about the host. Mirrors jamf2snipe's -u/-ui/-uf flags.
+  # Disabled by default. When enabled, every Snipe-IT user is loaded once
+  # at warm time and indexed by match_field for O(1) lookups during sync.
+  checkout:
+    enabled: false
+    # gjson path into the host JSON to extract the user identifier.
+    # Common choices:
+    #   end_users.0.idp_username              (Fleet Premium with IDP mapping)
+    #   end_users.0.email
+    #   users.#(type=="regular").username     (first regular OS user from osquery)
+    user_field: "end_users.0.idp_username"
+    # Snipe-IT user field to match the extracted value against:
+    # username (default), email, or employee_num.
+    match_field: "username"
+    # When to act on the discovered user:
+    #   assign  — only checkout if currently unassigned (default)
+    #   sync    — also reassign when the current user differs
+    #   force   — always (re)assign even if it already matches
+    mode: "assign"
+
 webhook:
   # `serve` listens for Fleet's activities webhook here.
   # Configure under Fleet Settings → Integrations → Automations → Activities.

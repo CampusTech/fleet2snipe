@@ -167,4 +167,8 @@ func printStats(s f2sync.Stats) {
 	fmt.Printf("  Errors:                %d\n", s.Errors)
 	fmt.Printf("  New models:            %d\n", s.ModelsCreated)
 	fmt.Printf("  New manufacturers:     %d\n", s.ManufacturersNew)
+	if s.CheckoutsApplied+s.CheckoutsSkipped > 0 {
+		fmt.Printf("  Checkouts applied:     %d\n", s.CheckoutsApplied)
+		fmt.Printf("  Checkouts skipped:     %d\n", s.CheckoutsSkipped)
+	}
 }

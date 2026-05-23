@@ -139,6 +139,26 @@ sync:
 
 A single Snipe-IT field that receives an alphabetised, comma-separated list of every label the host belongs to. Sorted output means a stable membership set produces a stable field value — no PATCH churn.
 
+## Checkout to assigned user
+
+Mirrors `jamf2snipe -u / -ui / -uf` but generalised across whichever Fleet field carries the user identifier. Disabled by default.
+
+```yaml
+sync:
+  checkout:
+    enabled: true
+    user_field: "end_users.0.idp_username"  # gjson path into the host JSON
+    match_field: "username"                 # snipe field: username | email | employee_num
+    mode: "assign"                          # assign | sync | force
+```
+
+- `user_field` is any gjson path that resolves to a single string. Good choices: `end_users.0.idp_username` (Fleet Premium with IDP), `end_users.0.email`, or `users.#(type=="regular").username` (first regular OS user from osquery).
+- `match_field` is the Snipe-IT user field to look the value up against. Match is case-insensitive.
+- `mode`: `assign` only checks out when the asset is currently unassigned (default, like `-u`); `sync` also reassigns when the user differs (like `-ui`); `force` always (re)assigns (like `-uf`).
+- All Snipe-IT users are loaded once at warm time and indexed for O(1) lookups, so per-host sync stays cheap regardless of fleet size.
+- Reassignments are handled correctly: Snipe-IT's checkout endpoint refuses to overwrite an existing assignment, so we check the asset in first when the desired user differs.
+- A Fleet user that has no Snipe-IT counterpart is logged at info and skipped — fleet2snipe never auto-creates users.
+
 ## Setup subcommand
 
 `fleet2snipe setup` is **idempotent** and safe to re-run. It creates / updates a baseline set of `Fleet: …` custom fields in Snipe-IT, associates them with your configured fieldset, and rewrites `sync.field_mapping` in `settings.yaml` (preserving comments) with the resulting `db_column_name`s.
