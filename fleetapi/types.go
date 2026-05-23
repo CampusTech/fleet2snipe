@@ -99,15 +99,15 @@ type Policy struct {
 
 // Query is a Fleet saved query.
 type Query struct {
-	ID           uint   `json:"id"`
-	Name         string `json:"name"`
-	Description  string `json:"description"`
-	Query        string `json:"query"`
-	TeamID       *uint  `json:"team_id"`
-	Interval     int    `json:"interval"`
-	Platform     string `json:"platform"`
-	DiscardData  bool   `json:"discard_data"`
-	AutomationsEnabled bool `json:"automations_enabled"`
+	ID                 uint   `json:"id"`
+	Name               string `json:"name"`
+	Description        string `json:"description"`
+	Query              string `json:"query"`
+	TeamID             *uint  `json:"team_id"`
+	Interval           int    `json:"interval"`
+	Platform           string `json:"platform"`
+	DiscardData        bool   `json:"discard_data"`
+	AutomationsEnabled bool   `json:"automations_enabled"`
 }
 
 type listQueriesResponse struct {

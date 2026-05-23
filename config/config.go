@@ -59,13 +59,13 @@ type SnipeITConfig struct {
 
 // SyncConfig holds sync behavior settings.
 type SyncConfig struct {
-	DryRun         bool   `yaml:"dry_run"`
-	Force          bool   `yaml:"force"`            // ignore timestamps, always update
-	RateLimit      bool   `yaml:"rate_limit"`       // enable Snipe-IT rate limiting
-	UpdateOnly     bool   `yaml:"update_only"`      // only update existing assets, never create
-	UseCache       bool   `yaml:"use_cache"`        // sync from cached hosts.json instead of API
-	CacheDir       string `yaml:"cache_dir"`        // default ".cache"
-	SetName        bool   `yaml:"set_name"`         // sync hostname into Snipe-IT name field
+	DryRun         bool           `yaml:"dry_run"`
+	Force          bool           `yaml:"force"`            // ignore timestamps, always update
+	RateLimit      bool           `yaml:"rate_limit"`       // enable Snipe-IT rate limiting
+	UpdateOnly     bool           `yaml:"update_only"`      // only update existing assets, never create
+	UseCache       bool           `yaml:"use_cache"`        // sync from cached hosts.json instead of API
+	CacheDir       string         `yaml:"cache_dir"`        // default ".cache"
+	SetName        bool           `yaml:"set_name"`         // sync hostname into Snipe-IT name field
 	AssetTagPrefix string         `yaml:"asset_tag_prefix"` // legacy: prepended to host id when sync.asset_tag.template is unset
 	AssetTag       AssetTagConfig `yaml:"asset_tag"`        // template-based asset tag generator
 	// FieldMapping maps a Snipe-IT custom field DB column (e.g. "_snipeit_os_version_3")
@@ -147,11 +147,11 @@ type QueryFieldMap struct {
 // FieldMappingEntry is the value side of sync.field_mapping. It accepts two
 // YAML shapes for backward compatibility:
 //
-//   _snipeit_fleet_host_id_1: id                # bare string → Path only
+//	_snipeit_fleet_host_id_1: id                # bare string → Path only
 //
-//   _snipeit_ram_2:                             # mapping → Path + Transform
-//     path: memory
-//     transform: bytes_to_gb
+//	_snipeit_ram_2:                             # mapping → Path + Transform
+//	  path: memory
+//	  transform: bytes_to_gb
 //
 // Path is a gjson expression evaluated against the Fleet host JSON. Transform,
 // if set, post-processes the resolved value before it's written to Snipe-IT.
@@ -188,10 +188,11 @@ var validTransforms = map[string]bool{
 	"": true, // no transform — write the raw value
 
 	// Unit conversions
-	"bytes_to_gb": true,
-	"bytes_to_mb": true,
-	"bytes_to_tb": true,
-	"gib_to_gb":   true,
+	"bytes_to_gb":  true,
+	"bytes_to_gib": true,
+	"bytes_to_mb":  true,
+	"bytes_to_tb":  true,
+	"gib_to_gb":    true,
 
 	// Time
 	"unix_to_iso": true,
@@ -502,10 +503,12 @@ func (c *SnipeITConfig) ManufacturerIDForVendor(vendor string) int {
 }
 
 // MergeFieldMapping reads a YAML config file, merges new field mappings into
-// sync.field_mapping and writes it back. If replaceValues is non-nil, any
-// existing entries whose value is in that set are removed first (used by
-// setup to replace stale field IDs with fresh ones). Comments are preserved.
-func MergeFieldMapping(path string, newMappings map[string]string, replaceValues map[string]bool) error {
+// sync.field_mapping and writes it back. Entries with an empty Transform are
+// written as bare-string YAML values; entries with a Transform get the
+// {path, transform} object form. If replaceValues is non-nil, any existing
+// entry whose path matches an entry in the set is removed first — both
+// scalar and mapping value-node shapes are handled. Comments are preserved.
+func MergeFieldMapping(path string, newMappings map[string]FieldMappingEntry, replaceValues map[string]bool) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("reading config file: %w", err)
@@ -530,7 +533,7 @@ func MergeFieldMapping(path string, newMappings map[string]string, replaceValues
 	if len(replaceValues) > 0 {
 		kept := fmNode.Content[:0]
 		for i := 0; i < len(fmNode.Content)-1; i += 2 {
-			if !replaceValues[fmNode.Content[i+1].Value] {
+			if !replaceValues[pathFromValueNode(fmNode.Content[i+1])] {
 				kept = append(kept, fmNode.Content[i], fmNode.Content[i+1])
 			}
 		}
@@ -542,12 +545,25 @@ func MergeFieldMapping(path string, newMappings map[string]string, replaceValues
 		existing[fmNode.Content[i].Value] = true
 	}
 
-	for dbCol, path := range newMappings {
-		if dbCol == "" || path == "" || existing[dbCol] {
+	for dbCol, entry := range newMappings {
+		if dbCol == "" || entry.Path == "" || existing[dbCol] {
 			continue
 		}
 		keyNode := &yaml.Node{Kind: yaml.ScalarNode, Value: dbCol, Tag: "!!str"}
-		valNode := &yaml.Node{Kind: yaml.ScalarNode, Value: path, Tag: "!!str"}
+		var valNode *yaml.Node
+		if entry.Transform == "" {
+			valNode = &yaml.Node{Kind: yaml.ScalarNode, Value: entry.Path, Tag: "!!str"}
+		} else {
+			valNode = &yaml.Node{
+				Kind: yaml.MappingNode, Tag: "!!map",
+				Content: []*yaml.Node{
+					{Kind: yaml.ScalarNode, Value: "path", Tag: "!!str"},
+					{Kind: yaml.ScalarNode, Value: entry.Path, Tag: "!!str"},
+					{Kind: yaml.ScalarNode, Value: "transform", Tag: "!!str"},
+					{Kind: yaml.ScalarNode, Value: entry.Transform, Tag: "!!str"},
+				},
+			}
+		}
 		fmNode.Content = append(fmNode.Content, keyNode, valNode)
 	}
 
@@ -560,6 +576,26 @@ func MergeFieldMapping(path string, newMappings map[string]string, replaceValues
 		return fmt.Errorf("writing config file: %w", err)
 	}
 	return nil
+}
+
+// pathFromValueNode extracts the gjson path from either a scalar (bare-string
+// form) or a mapping value node ({path, transform} object form). Returns ""
+// if the shape is unrecognised.
+func pathFromValueNode(n *yaml.Node) string {
+	if n == nil {
+		return ""
+	}
+	if n.Kind == yaml.ScalarNode {
+		return n.Value
+	}
+	if n.Kind == yaml.MappingNode {
+		for i := 0; i < len(n.Content)-1; i += 2 {
+			if n.Content[i].Value == "path" {
+				return n.Content[i+1].Value
+			}
+		}
+	}
+	return ""
 }
 
 func findOrCreateMapping(parent *yaml.Node, key string) *yaml.Node {

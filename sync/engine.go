@@ -38,15 +38,15 @@ func SetLogOutput(w io.Writer) { log.SetOutput(w) }
 
 // Stats tracks per-run counts.
 type Stats struct {
-	Total              int
-	Created            int
-	Updated            int
-	Skipped            int
-	Errors             int
-	ModelsCreated      int
-	ManufacturersNew   int
-	CheckoutsApplied   int
-	CheckoutsSkipped   int
+	Total            int
+	Created          int
+	Updated          int
+	Skipped          int
+	Errors           int
+	ModelsCreated    int
+	ManufacturersNew int
+	CheckoutsApplied int
+	CheckoutsSkipped int
 }
 
 // Add merges other into s.
@@ -746,6 +746,13 @@ func transformValue(r gjson.Result, transform string) string {
 			return ""
 		}
 		return strconv.FormatInt(int64(math.Round(float64(n)/1e9)), 10)
+	case "bytes_to_gib":
+		// Binary GiB = bytes / 2^30. Apple/macOS-style: "48GB" really means 48 GiB.
+		n := r.Int()
+		if n == 0 {
+			return ""
+		}
+		return strconv.FormatInt(int64(math.Round(float64(n)/1073741824.0)), 10)
 	case "bytes_to_mb":
 		n := r.Int()
 		if n == 0 {

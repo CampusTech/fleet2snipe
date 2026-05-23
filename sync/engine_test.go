@@ -22,10 +22,10 @@ func TestTransformValue(t *testing.T) {
 
 		// bytes_to_gb: divide by 1e9, round.
 		{"bytes 1 GB exact", `{"v": 1000000000}`, "bytes_to_gb", "1"},
-		{"bytes 8 GiB", `{"v": 8589934592}`, "bytes_to_gb", "9"},      // 8.59 → 9
-		{"bytes 16 GiB", `{"v": 17179869184}`, "bytes_to_gb", "17"},   // 17.18 → 17
-		{"bytes 32 GiB", `{"v": 34359738368}`, "bytes_to_gb", "34"},   // 34.36 → 34
-		{"bytes 64 GiB", `{"v": 68719476736}`, "bytes_to_gb", "69"},   // 68.72 → 69
+		{"bytes 8 GiB", `{"v": 8589934592}`, "bytes_to_gb", "9"},    // 8.59 → 9
+		{"bytes 16 GiB", `{"v": 17179869184}`, "bytes_to_gb", "17"}, // 17.18 → 17
+		{"bytes 32 GiB", `{"v": 34359738368}`, "bytes_to_gb", "34"}, // 34.36 → 34
+		{"bytes 64 GiB", `{"v": 68719476736}`, "bytes_to_gb", "69"}, // 68.72 → 69
 		{"bytes 500 GB exact", `{"v": 500000000000}`, "bytes_to_gb", "500"},
 		{"bytes zero", `{"v": 0}`, "bytes_to_gb", ""},
 		{"bytes missing", `{"missing": 1}`, "bytes_to_gb", ""},
@@ -40,6 +40,14 @@ func TestTransformValue(t *testing.T) {
 		{"gib zero", `{"v": 0}`, "gib_to_gb", ""},
 		{"gib missing", `{"missing": 1.0}`, "gib_to_gb", ""},
 		{"gib unparseable string", `{"v": "abc"}`, "gib_to_gb", ""},
+
+		// bytes_to_gib (binary GiB, matches About This Mac convention)
+		{"bytes_to_gib 1 GiB exact", `{"v": 1073741824}`, "bytes_to_gib", "1"},
+		{"bytes_to_gib 16 GiB", `{"v": 17179869184}`, "bytes_to_gib", "16"},
+		{"bytes_to_gib 48 GiB", `{"v": 51539607552}`, "bytes_to_gib", "48"},
+		{"bytes_to_gib 64 GiB", `{"v": 68719476736}`, "bytes_to_gib", "64"},
+		{"bytes_to_gib zero", `{"v": 0}`, "bytes_to_gib", ""},
+		{"bytes_to_gib missing", `{"x": 1}`, "bytes_to_gib", ""},
 
 		// bytes_to_mb
 		{"bytes_to_mb 1 MB exact", `{"v": 1000000}`, "bytes_to_mb", "1"},

@@ -42,7 +42,9 @@ func runSetup(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	// Field definitions — pair with a Fleet gjson path below.
+	// Field definitions — pair with a Fleet gjson path + optional default
+	// transform in entryByField below. The (GB) / (GiB) suffixes reflect the
+	// transformed unit so the field name doesn't lie about its contents.
 	fields := []snipe.FieldDef{
 		{Name: "Fleet: Host ID", Element: "text", Format: "NUMERIC", HelpText: "Fleet's internal host ID"},
 		{Name: "Fleet: Hostname", Element: "text", Format: "ANY", HelpText: "Hostname reported by osquery"},
@@ -51,12 +53,12 @@ func runSetup(cmd *cobra.Command, _ []string) error {
 		{Name: "Fleet: OS Build", Element: "text", Format: "ANY", HelpText: "OS build identifier"},
 		{Name: "Fleet: Status", Element: "radio", Format: "ANY", HelpText: "Online status as last reported by Fleet", FieldValues: "online\noffline\nmissing\nnew"},
 		{Name: "Fleet: Primary IP", Element: "text", Format: "IP", HelpText: "Primary private IP"},
-		{Name: "Fleet: Primary MAC", Element: "text", Format: "MAC", HelpText: "Primary MAC address"},
+		{Name: "Fleet: Primary MAC", Element: "text", Format: "MAC", HelpText: "Primary MAC address (lowercase, colon-separated)"},
 		{Name: "Fleet: Public IP", Element: "text", Format: "ANY", HelpText: "Public IP last seen by Fleet"},
 		{Name: "Fleet: CPU Brand", Element: "text", Format: "ANY", HelpText: "CPU brand string"},
-		{Name: "Fleet: Memory (bytes)", Element: "text", Format: "NUMERIC", HelpText: "RAM in bytes"},
-		{Name: "Fleet: Disk Free (GiB)", Element: "text", Format: "NUMERIC", HelpText: "Free disk space in GiB"},
-		{Name: "Fleet: Disk Total (GiB)", Element: "text", Format: "NUMERIC", HelpText: "Total disk space in GiB"},
+		{Name: "Fleet: Memory (GB)", Element: "text", Format: "NUMERIC", HelpText: "RAM, binary GiB (the 'GB' figure About This Mac shows for RAM)"},
+		{Name: "Fleet: Disk Free (GB)", Element: "text", Format: "NUMERIC", HelpText: "Free disk space, decimal GB (matches marketed disk capacity)"},
+		{Name: "Fleet: Disk Total (GB)", Element: "text", Format: "NUMERIC", HelpText: "Total disk space, decimal GB"},
 		{Name: "Fleet: Disk Encryption", Element: "listbox", Format: "BOOLEAN", HelpText: "Whether full-disk encryption is enabled (detail endpoint only)", FieldValues: "true\nfalse"},
 		{Name: "Fleet: MDM Enrollment", Element: "text", Format: "ANY", HelpText: "MDM enrollment status (e.g. 'On (manual)')"},
 		{Name: "Fleet: MDM Server", Element: "text", Format: "URL", HelpText: "MDM server URL"},
@@ -73,45 +75,51 @@ func runSetup(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("setting up fields: %w", err)
 	}
 
-	// field name -> Fleet gjson path. Adjust if you change the field list above.
-	pathByField := map[string]string{
-		"Fleet: Host ID":          "id",
-		"Fleet: Hostname":         "hostname",
-		"Fleet: Platform":         "platform",
-		"Fleet: OS Version":       "os_version",
-		"Fleet: OS Build":         "build",
-		"Fleet: Status":           "status",
-		"Fleet: Primary IP":       "primary_ip",
-		"Fleet: Primary MAC":      "primary_mac",
-		"Fleet: Public IP":        "public_ip",
-		"Fleet: CPU Brand":        "cpu_brand",
-		"Fleet: Memory (bytes)":   "memory",
-		"Fleet: Disk Free (GiB)":  "gigs_disk_space_available",
-		"Fleet: Disk Total (GiB)": "gigs_total_disk_space",
-		"Fleet: Disk Encryption":  "disk_encryption_enabled",
-		"Fleet: MDM Enrollment":   "mdm.enrollment_status",
-		"Fleet: MDM Server":       "mdm.server_url",
-		"Fleet: MDM Name":         "mdm.name",
-		"Fleet: Team":             "team_name",
-		"Fleet: Last Enrolled At": "last_enrolled_at",
-		"Fleet: Last Seen":        "seen_time",
-		"Fleet: Osquery Version":  "osquery_version",
+	// field name -> (gjson path, optional transform). Memory uses bytes_to_gib
+	// (binary, matches About This Mac); disk uses gib_to_gb (decimal, matches
+	// marketed capacity); MAC uses mac_colons (canonical lowercase form).
+	entryByField := map[string]config.FieldMappingEntry{
+		"Fleet: Host ID":          {Path: "id"},
+		"Fleet: Hostname":         {Path: "hostname"},
+		"Fleet: Platform":         {Path: "platform"},
+		"Fleet: OS Version":       {Path: "os_version"},
+		"Fleet: OS Build":         {Path: "build"},
+		"Fleet: Status":           {Path: "status"},
+		"Fleet: Primary IP":       {Path: "primary_ip"},
+		"Fleet: Primary MAC":      {Path: "primary_mac", Transform: "mac_colons"},
+		"Fleet: Public IP":        {Path: "public_ip"},
+		"Fleet: CPU Brand":        {Path: "cpu_brand"},
+		"Fleet: Memory (GB)":      {Path: "memory", Transform: "bytes_to_gib"},
+		"Fleet: Disk Free (GB)":   {Path: "gigs_disk_space_available", Transform: "gib_to_gb"},
+		"Fleet: Disk Total (GB)":  {Path: "gigs_total_disk_space", Transform: "gib_to_gb"},
+		"Fleet: Disk Encryption":  {Path: "disk_encryption_enabled"},
+		"Fleet: MDM Enrollment":   {Path: "mdm.enrollment_status"},
+		"Fleet: MDM Server":       {Path: "mdm.server_url"},
+		"Fleet: MDM Name":         {Path: "mdm.name"},
+		"Fleet: Team":             {Path: "team_name"},
+		"Fleet: Last Enrolled At": {Path: "last_enrolled_at"},
+		"Fleet: Last Seen":        {Path: "seen_time"},
+		"Fleet: Osquery Version":  {Path: "osquery_version"},
 	}
 
-	mapping := make(map[string]string, len(created))
+	mapping := make(map[string]config.FieldMappingEntry, len(created))
 	replace := make(map[string]bool, len(created))
 	for name, dbCol := range created {
-		if path, ok := pathByField[name]; ok && dbCol != "" {
-			mapping[dbCol] = path
-			replace[path] = true
+		if entry, ok := entryByField[name]; ok && dbCol != "" {
+			mapping[dbCol] = entry
+			replace[entry.Path] = true
 		}
 	}
 
 	if err := config.MergeFieldMapping(ConfigFile, mapping, replace); err != nil {
 		log.Warnf("could not save field mappings to %s: %v", ConfigFile, err)
 		fmt.Println("\nAdd these to your settings.yaml sync.field_mapping manually:")
-		for dbCol, path := range mapping {
-			fmt.Printf("    %s: %s\n", dbCol, path)
+		for dbCol, entry := range mapping {
+			if entry.Transform == "" {
+				fmt.Printf("    %s: %s\n", dbCol, entry.Path)
+			} else {
+				fmt.Printf("    %s:\n      path: %s\n      transform: %s\n", dbCol, entry.Path, entry.Transform)
+			}
 		}
 	} else {
 		fmt.Printf("\nField mappings saved to %s\n", ConfigFile)
