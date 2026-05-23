@@ -169,9 +169,26 @@ func (e *FieldMappingEntry) UnmarshalYAML(node *yaml.Node) error {
 // validTransforms enumerates every transform name applyTransform knows about.
 // Keep this in lockstep with the switch in sync/engine.go.
 var validTransforms = map[string]bool{
-	"":            true, // no transform — write the raw value
+	"": true, // no transform — write the raw value
+
+	// Unit conversions
 	"bytes_to_gb": true,
+	"bytes_to_mb": true,
+	"bytes_to_tb": true,
 	"gib_to_gb":   true,
+
+	// Time
+	"unix_to_iso": true,
+
+	// String
+	"uppercase":  true,
+	"lowercase":  true,
+	"mac_colons": true,
+	"mac_dashes": true,
+
+	// Display helpers
+	"comma_thousands": true,
+	"bool_yes_no":     true,
 }
 
 // ValidTransformNames returns the supported transform names, useful for error

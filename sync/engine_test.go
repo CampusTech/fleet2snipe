@@ -41,6 +41,61 @@ func TestTransformValue(t *testing.T) {
 		{"gib missing", `{"missing": 1.0}`, "gib_to_gb", ""},
 		{"gib unparseable string", `{"v": "abc"}`, "gib_to_gb", ""},
 
+		// bytes_to_mb
+		{"bytes_to_mb 1 MB exact", `{"v": 1000000}`, "bytes_to_mb", "1"},
+		{"bytes_to_mb 512 MiB", `{"v": 536870912}`, "bytes_to_mb", "537"},
+		{"bytes_to_mb zero", `{"v": 0}`, "bytes_to_mb", ""},
+		{"bytes_to_mb missing", `{"x": 1}`, "bytes_to_mb", ""},
+
+		// bytes_to_tb
+		{"bytes_to_tb 1 TB exact", `{"v": 1000000000000}`, "bytes_to_tb", "1"},
+		{"bytes_to_tb 2 TiB", `{"v": 2199023255552}`, "bytes_to_tb", "2"},
+		{"bytes_to_tb zero", `{"v": 0}`, "bytes_to_tb", ""},
+
+		// unix_to_iso
+		{"unix_to_iso epoch+1", `{"v": 1}`, "unix_to_iso", "1970-01-01 00:00:01"},
+		{"unix_to_iso known time", `{"v": 1700000000}`, "unix_to_iso", "2023-11-14 22:13:20"},
+		{"unix_to_iso zero", `{"v": 0}`, "unix_to_iso", ""},
+		{"unix_to_iso missing", `{"x": 1}`, "unix_to_iso", ""},
+
+		// uppercase / lowercase
+		{"uppercase", `{"v": "Hello-World"}`, "uppercase", "HELLO-WORLD"},
+		{"uppercase empty", `{"v": ""}`, "uppercase", ""},
+		{"uppercase missing", `{"x": "y"}`, "uppercase", ""},
+		{"lowercase", `{"v": "Hello-World"}`, "lowercase", "hello-world"},
+		{"lowercase non-string number", `{"v": 42}`, "lowercase", "42"},
+
+		// mac_colons / mac_dashes
+		{"mac_colons from dashes", `{"v": "AA-BB-CC-DD-EE-FF"}`, "mac_colons", "aa:bb:cc:dd:ee:ff"},
+		{"mac_colons from colons", `{"v": "aa:bb:cc:dd:ee:ff"}`, "mac_colons", "aa:bb:cc:dd:ee:ff"},
+		{"mac_colons from cisco dots", `{"v": "aabb.ccdd.eeff"}`, "mac_colons", "aa:bb:cc:dd:ee:ff"},
+		{"mac_colons from bare hex", `{"v": "AABBCCDDEEFF"}`, "mac_colons", "aa:bb:cc:dd:ee:ff"},
+		{"mac_dashes from colons", `{"v": "aa:bb:cc:dd:ee:ff"}`, "mac_dashes", "aa-bb-cc-dd-ee-ff"},
+		{"mac invalid length", `{"v": "aabbccdd"}`, "mac_colons", ""},
+		{"mac garbage", `{"v": "not a mac"}`, "mac_colons", ""},
+		{"mac empty", `{"v": ""}`, "mac_colons", ""},
+
+		// comma_thousands
+		{"comma_thousands int", `{"v": 1234567}`, "comma_thousands", "1,234,567"},
+		{"comma_thousands small int", `{"v": 42}`, "comma_thousands", "42"},
+		{"comma_thousands zero passes through", `{"v": 0}`, "comma_thousands", "0"},
+		{"comma_thousands negative", `{"v": -1234567}`, "comma_thousands", "-1,234,567"},
+		{"comma_thousands string number", `{"v": "9876543"}`, "comma_thousands", "9,876,543"},
+		{"comma_thousands float passes through", `{"v": 1.5}`, "comma_thousands", "1.5"},
+		{"comma_thousands unparseable", `{"v": "abc"}`, "comma_thousands", ""},
+
+		// bool_yes_no
+		{"bool_yes_no native true", `{"v": true}`, "bool_yes_no", "Yes"},
+		{"bool_yes_no native false", `{"v": false}`, "bool_yes_no", "No"},
+		{"bool_yes_no string true", `{"v": "true"}`, "bool_yes_no", "Yes"},
+		{"bool_yes_no string yes", `{"v": "yes"}`, "bool_yes_no", "Yes"},
+		{"bool_yes_no string Y", `{"v": "Y"}`, "bool_yes_no", "Yes"},
+		{"bool_yes_no string false", `{"v": "false"}`, "bool_yes_no", "No"},
+		{"bool_yes_no string no", `{"v": "no"}`, "bool_yes_no", "No"},
+		{"bool_yes_no number 1", `{"v": 1}`, "bool_yes_no", "Yes"},
+		{"bool_yes_no number 0", `{"v": 0}`, "bool_yes_no", "No"},
+		{"bool_yes_no unknown string", `{"v": "maybe"}`, "bool_yes_no", ""},
+
 		// Unknown transform name — degrades to raw rather than dropping data.
 		// Real usage rejects this at config load; this just covers the safety net.
 		{"unknown transform falls back to raw", `{"v": 42}`, "wat", "42"},

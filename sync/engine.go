@@ -700,12 +700,15 @@ func policyResponse(policies []fleetapi.Policy, name string) string {
 }
 
 // transformValue post-processes a resolved gjson value for Snipe-IT storage.
-// transform == "" means write the raw value via stringifyGJSON. Recognised
-// transforms convert byte/GiB measurements into decimal GB (base-10) so that
-// values are human-friendly and consistent across memory + storage fields.
+// transform == "" means write the raw value via stringifyGJSON. The other
+// recognised transforms either standardise units (bytes/GiB → GB/MB/TB,
+// unix → ISO timestamp) or apply lightweight string normalisation (case,
+// MAC separators, boolean rendering, thousands grouping).
 //
-// Per spec: zero, missing, and unparseable inputs all return "" so we never
-// overwrite real Snipe-IT data with "0" from a host that hasn't reported in.
+// Numeric "no data" inputs (0, missing, unparseable) all return "" for the
+// unit conversions — we never overwrite real Snipe-IT data with a placeholder
+// from a host that hasn't reported. For purely cosmetic transforms
+// (comma_thousands, bool_yes_no), legitimate zero values pass through.
 //
 // Transform names are validated at config load time; an unknown value here
 // would only fire if validation was bypassed, in which case we degrade
@@ -714,6 +717,9 @@ func transformValue(r gjson.Result, transform string) string {
 	switch transform {
 	case "":
 		return stringifyGJSON(r)
+
+	// --- Byte-scale conversions (input: int64 bytes) ---
+
 	case "bytes_to_gb":
 		// Fleet's memory field is int64 bytes. Decimal GB = bytes / 1_000_000_000.
 		n := r.Int()
@@ -721,6 +727,18 @@ func transformValue(r gjson.Result, transform string) string {
 			return ""
 		}
 		return strconv.FormatInt(int64(math.Round(float64(n)/1e9)), 10)
+	case "bytes_to_mb":
+		n := r.Int()
+		if n == 0 {
+			return ""
+		}
+		return strconv.FormatInt(int64(math.Round(float64(n)/1e6)), 10)
+	case "bytes_to_tb":
+		n := r.Int()
+		if n == 0 {
+			return ""
+		}
+		return strconv.FormatInt(int64(math.Round(float64(n)/1e12)), 10)
 	case "gib_to_gb":
 		// Fleet's disk-space fields (gigs_total_disk_space, gigs_disk_space_available)
 		// are float GiB. GB = GiB * (2^30 / 10^9) = GiB * 1.073741824.
@@ -729,11 +747,147 @@ func transformValue(r gjson.Result, transform string) string {
 			return ""
 		}
 		return strconv.FormatInt(int64(math.Round(f*(1073741824.0/1000000000.0))), 10)
+
+	// --- Time ---
+
+	case "unix_to_iso":
+		// Render Unix epoch seconds as Snipe's display format in UTC. Matches
+		// what stringifyGJSON does with RFC3339 input so all timestamps look
+		// the same across fields. A zero timestamp (1970-01-01) is treated as
+		// "missing data" rather than a real value.
+		n := r.Int()
+		if n == 0 {
+			return ""
+		}
+		return time.Unix(n, 0).UTC().Format("2006-01-02 15:04:05")
+
+	// --- String case ---
+
+	case "uppercase":
+		s := r.String()
+		if s == "" {
+			return ""
+		}
+		return strings.ToUpper(s)
+	case "lowercase":
+		s := r.String()
+		if s == "" {
+			return ""
+		}
+		return strings.ToLower(s)
+
+	// --- MAC normalisation ---
+
+	case "mac_colons":
+		return normalizeMAC(r.String(), ":")
+	case "mac_dashes":
+		return normalizeMAC(r.String(), "-")
+
+	// --- Display helpers ---
+
+	case "comma_thousands":
+		// Whole numbers get comma grouping; floats fall back to default format
+		// since "1,234.56" thousands grouping on a decimal isn't well-defined
+		// for our use case (Snipe-IT custom fields are display-only here).
+		switch r.Type {
+		case gjson.Number:
+			if r.Num == math.Trunc(r.Num) {
+				return commaThousands(int64(r.Num))
+			}
+			return strconv.FormatFloat(r.Num, 'f', -1, 64)
+		case gjson.String:
+			if n, err := strconv.ParseInt(strings.TrimSpace(r.Str), 10, 64); err == nil {
+				return commaThousands(n)
+			}
+		}
+		return ""
+
+	case "bool_yes_no":
+		switch r.Type {
+		case gjson.True:
+			return "Yes"
+		case gjson.False:
+			return "No"
+		case gjson.Number:
+			if r.Num == 0 {
+				return "No"
+			}
+			return "Yes"
+		case gjson.String:
+			switch strings.ToLower(strings.TrimSpace(r.Str)) {
+			case "true", "yes", "1", "y", "t":
+				return "Yes"
+			case "false", "no", "0", "n", "f":
+				return "No"
+			}
+		}
+		return ""
+
 	default:
 		// Shouldn't be reachable — config validation rejects unknown transforms
 		// before we get here — but fall back to raw rather than dropping data.
 		return stringifyGJSON(r)
 	}
+}
+
+// normalizeMAC strips every non-hex character from s, then re-inserts sep
+// between byte pairs and lowercases the hex. Returns "" when the input
+// doesn't contain exactly 12 hex characters — handles colon, dash, dot
+// (Cisco), and no-separator forms uniformly.
+func normalizeMAC(s, sep string) string {
+	var hex strings.Builder
+	hex.Grow(12)
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9', r >= 'a' && r <= 'f', r >= 'A' && r <= 'F':
+			hex.WriteRune(r)
+		}
+	}
+	h := strings.ToLower(hex.String())
+	if len(h) != 12 {
+		return ""
+	}
+	var out strings.Builder
+	out.Grow(17)
+	for i := 0; i < 12; i += 2 {
+		if i > 0 {
+			out.WriteString(sep)
+		}
+		out.WriteString(h[i : i+2])
+	}
+	return out.String()
+}
+
+// commaThousands formats an int64 with US-style thousands separators.
+// 1234567 → "1,234,567". No localization; Snipe-IT custom fields are display
+// strings so we can keep it simple.
+func commaThousands(n int64) string {
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	s := strconv.FormatInt(n, 10)
+	if len(s) <= 3 {
+		if neg {
+			return "-" + s
+		}
+		return s
+	}
+	first := len(s) % 3
+	if first == 0 {
+		first = 3
+	}
+	var out strings.Builder
+	out.Grow(len(s) + len(s)/3)
+	if neg {
+		out.WriteByte('-')
+	}
+	out.WriteString(s[:first])
+	for i := first; i < len(s); i += 3 {
+		out.WriteByte(',')
+		out.WriteString(s[i : i+3])
+	}
+	return out.String()
 }
 
 // stringifyGJSON renders a gjson Result as a single string suitable for

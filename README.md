@@ -100,14 +100,27 @@ sync:
 
 Full [gjson](https://github.com/tidwall/gjson) syntax (arrays, filters, modifiers) is supported on `path`.
 
-**Transforms** standardise units before writing to Snipe-IT. Fleet emits memory as `int64` bytes and disk space as `float` *GiB* (despite the misleading `gigs_*` field name) — without a transform you'd get inconsistent units across the same fieldset. Supported transforms:
+**Transforms** standardise units and rendering before the value lands in Snipe-IT. Fleet emits memory as `int64` bytes and disk space as `float` *GiB* (despite the misleading `gigs_*` field name) — without a transform you'd get inconsistent units across the same fieldset.
 
-| Name           | Input                            | Output                                      |
-|----------------|----------------------------------|---------------------------------------------|
-| `bytes_to_gb`  | int64 bytes                      | decimal GB (`bytes / 10⁹`), rounded integer |
-| `gib_to_gb`    | float GiB                        | decimal GB (`GiB × 1.073741824`), rounded   |
+| Category        | Name              | Input                       | Output                                                          |
+|-----------------|-------------------|-----------------------------|-----------------------------------------------------------------|
+| Unit conversion | `bytes_to_gb`     | int64 bytes                 | decimal GB (`bytes / 10⁹`), rounded integer                     |
+|                 | `bytes_to_mb`     | int64 bytes                 | decimal MB (`bytes / 10⁶`), rounded integer                     |
+|                 | `bytes_to_tb`     | int64 bytes                 | decimal TB (`bytes / 10¹²`), rounded integer                    |
+|                 | `gib_to_gb`       | float GiB                   | decimal GB (`GiB × 1.073741824`), rounded                       |
+| Time            | `unix_to_iso`     | int64 seconds-since-epoch   | `YYYY-MM-DD HH:MM:SS` UTC (matches existing RFC3339 normalisation) |
+| String          | `uppercase`       | any string                  | `strings.ToUpper`                                               |
+|                 | `lowercase`       | any string                  | `strings.ToLower`                                               |
+|                 | `mac_colons`      | any MAC-ish string          | `aa:bb:cc:dd:ee:ff` (colon-separated, lowercase)                |
+|                 | `mac_dashes`      | any MAC-ish string          | `aa-bb-cc-dd-ee-ff` (dash-separated, lowercase)                 |
+| Display         | `comma_thousands` | integer (or numeric string) | `1,234,567` US-style thousands grouping                         |
+|                 | `bool_yes_no`     | bool / numeric / string     | `Yes` / `No` for true-ish / false-ish; `""` for unknown values  |
 
-Zero, missing, or unparseable values resolve to `""` so we never clobber real Snipe-IT data with a placeholder from a host that hasn't reported in yet. Unknown transform names are **rejected at config load** with a clear error rather than silently no-op'ing.
+**Empty-on-no-data rule**: zero, missing, and unparseable values resolve to `""` for the unit conversions and `unix_to_iso` so we never clobber real Snipe-IT data with a placeholder from a host that hasn't reported in yet. For the cosmetic transforms (`comma_thousands`, case), a legitimate `0` or empty string passes through unchanged.
+
+**MAC normaliser** strips every non-hex character then re-inserts the chosen separator between byte pairs, so colon, dash, dot (Cisco `aabb.ccdd.eeff`), and run-on `AABBCCDDEEFF` formats all converge to the same form. Inputs that don't reduce to exactly 12 hex characters return `""`.
+
+Unknown transform names are **rejected at config load** with an error naming both the bad transform and the field that used it — typos surface immediately rather than per-host.
 
 ### 2. `policy_mapping` — Fleet policies (compliance "controls")
 

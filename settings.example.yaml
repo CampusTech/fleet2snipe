@@ -104,18 +104,29 @@ sync:
   #
   # Supported transforms (rejected at startup if unrecognised):
   #
-  #   bytes_to_gb  — parse the resolved value as int64 bytes, divide by 10^9,
-  #                  round to nearest integer. Used for Fleet's `memory` field
-  #                  (which is int64 bytes). 17_179_869_184 bytes → "17".
+  #   Unit conversions (zero / missing / unparseable → "")
+  #     bytes_to_gb     — int64 bytes / 10^9, rounded. 17_179_869_184 → "17".
+  #     bytes_to_mb     — int64 bytes / 10^6, rounded.
+  #     bytes_to_tb     — int64 bytes / 10^12, rounded.
+  #     gib_to_gb       — float GiB * 1.073741824, rounded. 465.5 → "500".
   #
-  #   gib_to_gb    — parse the resolved value as float GiB, multiply by
-  #                  1.073741824, round to nearest integer. Used for Fleet's
-  #                  gigs_total_disk_space / gigs_disk_space_available (which
-  #                  are float GiB despite the misleading "gigs" name).
-  #                  465.5 GiB → "500".
+  #   Time (zero / missing → "")
+  #     unix_to_iso     — int64 seconds-since-epoch → "YYYY-MM-DD HH:MM:SS"
+  #                       in UTC. Matches the format stringifyGJSON uses for
+  #                       RFC3339 strings, so all timestamps look the same.
   #
-  # Zero, missing, or unparseable values resolve to "" so we never overwrite
-  # real Snipe-IT data with placeholder zeros from hosts that haven't reported.
+  #   String normalisation (empty → "")
+  #     uppercase       — strings.ToUpper.
+  #     lowercase       — strings.ToLower.
+  #     mac_colons      — strip non-hex, lowercase, regroup → aa:bb:cc:dd:ee:ff.
+  #                       Handles colon, dash, dot (Cisco aabb.ccdd.eeff), and
+  #                       bare-hex inputs uniformly.
+  #     mac_dashes      — same, with dashes → aa-bb-cc-dd-ee-ff.
+  #
+  #   Display (legitimate zero passes through)
+  #     comma_thousands — 1234567 → "1,234,567". Accepts numeric strings too.
+  #     bool_yes_no     — true/yes/1/Y → "Yes"; false/no/0/N → "No";
+  #                       unknown values → "".
   #
   # Example after setup, with a couple of transforms added by hand:
   # field_mapping:
@@ -131,6 +142,18 @@ sync:
   #   _snipeit_storage_free_6:
   #     path: gigs_disk_space_available
   #     transform: gib_to_gb
+  #   _snipeit_serial_upper_7:
+  #     path: hardware_serial
+  #     transform: uppercase                # normalize search key
+  #   _snipeit_primary_mac_8:
+  #     path: primary_mac
+  #     transform: mac_colons               # canonical aa:bb:cc:dd:ee:ff
+  #   _snipeit_disk_encryption_9:
+  #     path: disk_encryption_enabled
+  #     transform: bool_yes_no              # true → "Yes", false → "No"
+  #   _snipeit_seen_at_10:
+  #     path: seen_time_unix                # (saved query that emits epoch seconds)
+  #     transform: unix_to_iso
 
   # Policy mappings: Snipe-IT custom field db_column -> Fleet policy name.
   # Writes the host's pass/fail response into the field. populate_policies
