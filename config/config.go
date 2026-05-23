@@ -4,7 +4,9 @@
 package config
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"strings"
 
@@ -248,17 +250,26 @@ type WebhookConfig struct {
 }
 
 // Load reads configuration from a YAML file and applies environment variable
-// overrides. Missing file returns an error — callers may swallow it for
-// commands that should run without a config (e.g. `--help`).
+// overrides. A missing file is non-fatal — env vars and defaults still apply,
+// so env-var-only setups (Docker) work without a settings.yaml. Parse errors,
+// permission errors, and transform validation errors are returned to the
+// caller; callers must not silently swallow them or stale binaries will look
+// like missing-required-field errors instead of obvious parse failures.
 func Load(path string) (*Config, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("reading config file: %w", err)
-	}
-
 	cfg := &Config{}
-	if err := yaml.Unmarshal(data, cfg); err != nil {
-		return nil, fmt.Errorf("parsing config file: %w", err)
+
+	data, err := os.ReadFile(path)
+	switch {
+	case err == nil:
+		if err := yaml.Unmarshal(data, cfg); err != nil {
+			return nil, fmt.Errorf("parsing %s: %w", path, err)
+		}
+	case errors.Is(err, fs.ErrNotExist):
+		// File-not-found is non-fatal so env-var-only setups (e.g. Docker)
+		// can run without a settings.yaml. Any other read error — permission
+		// denied, I/O failure — surfaces.
+	default:
+		return nil, fmt.Errorf("reading %s: %w", path, err)
 	}
 
 	// Environment variable overrides

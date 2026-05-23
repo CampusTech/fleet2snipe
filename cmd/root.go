@@ -43,11 +43,12 @@ func LoadConfig(cmd *cobra.Command) error {
 	var err error
 	Cfg, err = config.Load(ConfigFile)
 	if err != nil {
-		// Missing default config file is non-fatal; an explicit --config that's missing is.
-		if cmd.Flags().Changed("config") {
-			return fmt.Errorf("loading config: %w", err)
-		}
-		Cfg = &config.Config{}
+		// config.Load already treats file-not-found as non-fatal. Anything that
+		// reaches us here — parse error, permission denied, transform validation
+		// failure — is a real problem and must surface, not be swallowed into
+		// an empty Config (that turns "your YAML doesn't parse" into the much
+		// more confusing "fleet.url is required").
+		return fmt.Errorf("loading config: %w", err)
 	}
 
 	applyBoolFlag(cmd, "dry-run", &Cfg.Sync.DryRun)
