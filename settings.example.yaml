@@ -91,13 +91,46 @@ sync:
   # asset_tag_prefix: "fleet-"
   # platform_filter: ["darwin", "windows"]  # only sync these platforms
 
-  # Field mappings: Snipe-IT custom field db_column_name -> gjson path into the
-  # Fleet host JSON. Run `fleet2snipe setup` once to auto-populate this list.
-  # Example after setup:
+  # Field mappings: Snipe-IT custom field db_column_name -> Fleet host data.
+  # Run `fleet2snipe setup` once to auto-populate the bare-path entries.
+  #
+  # Each entry accepts two YAML shapes:
+  #
+  #   <db_column>: <gjson path>          (bare string — path only, no transform)
+  #
+  #   <db_column>:                       (object form — adds a value transform)
+  #     path: <gjson path>
+  #     transform: <name>
+  #
+  # Supported transforms (rejected at startup if unrecognised):
+  #
+  #   bytes_to_gb  — parse the resolved value as int64 bytes, divide by 10^9,
+  #                  round to nearest integer. Used for Fleet's `memory` field
+  #                  (which is int64 bytes). 17_179_869_184 bytes → "17".
+  #
+  #   gib_to_gb    — parse the resolved value as float GiB, multiply by
+  #                  1.073741824, round to nearest integer. Used for Fleet's
+  #                  gigs_total_disk_space / gigs_disk_space_available (which
+  #                  are float GiB despite the misleading "gigs" name).
+  #                  465.5 GiB → "500".
+  #
+  # Zero, missing, or unparseable values resolve to "" so we never overwrite
+  # real Snipe-IT data with placeholder zeros from hosts that haven't reported.
+  #
+  # Example after setup, with a couple of transforms added by hand:
   # field_mapping:
   #   _snipeit_fleet_host_id_1: id
   #   _snipeit_fleet_os_version_2: os_version
   #   _snipeit_fleet_mdm_enrollment_3: mdm.enrollment_status
+  #   _snipeit_ram_4:
+  #     path: memory
+  #     transform: bytes_to_gb              # bytes → GB (decimal, 10^9)
+  #   _snipeit_storage_total_5:
+  #     path: gigs_total_disk_space
+  #     transform: gib_to_gb                # GiB → GB (decimal, 10^9)
+  #   _snipeit_storage_free_6:
+  #     path: gigs_disk_space_available
+  #     transform: gib_to_gb
 
   # Policy mappings: Snipe-IT custom field db_column -> Fleet policy name.
   # Writes the host's pass/fail response into the field. populate_policies

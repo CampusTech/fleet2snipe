@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"regexp"
 	"sort"
 	"strconv"
@@ -620,15 +621,15 @@ func (e *Engine) applyMapping(h fleetapi.Host) map[string]string {
 
 	if len(e.cfg.Sync.FieldMapping) > 0 && len(h.Raw) > 0 {
 		root := gjson.ParseBytes(h.Raw)
-		for dbCol, path := range e.cfg.Sync.FieldMapping {
-			if dbCol == "" || path == "" {
+		for dbCol, entry := range e.cfg.Sync.FieldMapping {
+			if dbCol == "" || entry.Path == "" {
 				continue
 			}
-			res := root.Get(path)
+			res := root.Get(entry.Path)
 			if !res.Exists() {
 				continue
 			}
-			if val := stringifyGJSON(res); val != "" {
+			if val := transformValue(res, entry.Transform); val != "" {
 				out[dbCol] = val
 			}
 		}
@@ -696,6 +697,43 @@ func policyResponse(policies []fleetapi.Policy, name string) string {
 		}
 	}
 	return ""
+}
+
+// transformValue post-processes a resolved gjson value for Snipe-IT storage.
+// transform == "" means write the raw value via stringifyGJSON. Recognised
+// transforms convert byte/GiB measurements into decimal GB (base-10) so that
+// values are human-friendly and consistent across memory + storage fields.
+//
+// Per spec: zero, missing, and unparseable inputs all return "" so we never
+// overwrite real Snipe-IT data with "0" from a host that hasn't reported in.
+//
+// Transform names are validated at config load time; an unknown value here
+// would only fire if validation was bypassed, in which case we degrade
+// gracefully to the raw string instead of dropping the data.
+func transformValue(r gjson.Result, transform string) string {
+	switch transform {
+	case "":
+		return stringifyGJSON(r)
+	case "bytes_to_gb":
+		// Fleet's memory field is int64 bytes. Decimal GB = bytes / 1_000_000_000.
+		n := r.Int()
+		if n == 0 {
+			return ""
+		}
+		return strconv.FormatInt(int64(math.Round(float64(n)/1e9)), 10)
+	case "gib_to_gb":
+		// Fleet's disk-space fields (gigs_total_disk_space, gigs_disk_space_available)
+		// are float GiB. GB = GiB * (2^30 / 10^9) = GiB * 1.073741824.
+		f := r.Float()
+		if f == 0 {
+			return ""
+		}
+		return strconv.FormatInt(int64(math.Round(f*(1073741824.0/1000000000.0))), 10)
+	default:
+		// Shouldn't be reachable — config validation rejects unknown transforms
+		// before we get here — but fall back to raw rather than dropping data.
+		return stringifyGJSON(r)
+	}
 }
 
 // stringifyGJSON renders a gjson Result as a single string suitable for

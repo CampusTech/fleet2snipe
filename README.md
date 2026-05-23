@@ -80,18 +80,34 @@ Five sources feed the same `custom_fields` map; values that come back empty are 
 
 ### 1. `field_mapping` — gjson paths into the host JSON
 
-Auto-populated by `fleet2snipe setup`. Use anywhere you'd reach into the host structure:
+Auto-populated by `fleet2snipe setup`. Each entry is either a bare gjson path or an object with `path` + optional `transform`. Both forms coexist:
 
 ```yaml
 sync:
   field_mapping:
-    _snipeit_fleet_host_id_1: id
+    _snipeit_fleet_host_id_1: id                # bare string — path only
     _snipeit_fleet_os_version_2: os_version
     _snipeit_mdm_enrollment_3: mdm.enrollment_status
     _snipeit_first_label_4: labels.0.name
+
+    _snipeit_ram_5:                              # object form — adds a transform
+      path: memory
+      transform: bytes_to_gb                     # 17179869184 bytes → "17"
+    _snipeit_storage_6:
+      path: gigs_total_disk_space
+      transform: gib_to_gb                       # 465.5 GiB → "500"
 ```
 
-Full [gjson](https://github.com/tidwall/gjson) syntax (arrays, filters, modifiers) is supported.
+Full [gjson](https://github.com/tidwall/gjson) syntax (arrays, filters, modifiers) is supported on `path`.
+
+**Transforms** standardise units before writing to Snipe-IT. Fleet emits memory as `int64` bytes and disk space as `float` *GiB* (despite the misleading `gigs_*` field name) — without a transform you'd get inconsistent units across the same fieldset. Supported transforms:
+
+| Name           | Input                            | Output                                      |
+|----------------|----------------------------------|---------------------------------------------|
+| `bytes_to_gb`  | int64 bytes                      | decimal GB (`bytes / 10⁹`), rounded integer |
+| `gib_to_gb`    | float GiB                        | decimal GB (`GiB × 1.073741824`), rounded   |
+
+Zero, missing, or unparseable values resolve to `""` so we never clobber real Snipe-IT data with a placeholder from a host that hasn't reported in yet. Unknown transform names are **rejected at config load** with a clear error rather than silently no-op'ing.
 
 ### 2. `policy_mapping` — Fleet policies (compliance "controls")
 

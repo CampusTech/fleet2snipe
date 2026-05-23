@@ -69,9 +69,10 @@ type SyncConfig struct {
 	AssetTagPrefix string         `yaml:"asset_tag_prefix"` // legacy: prepended to host id when sync.asset_tag.template is unset
 	AssetTag       AssetTagConfig `yaml:"asset_tag"`        // template-based asset tag generator
 	// FieldMapping maps a Snipe-IT custom field DB column (e.g. "_snipeit_os_version_3")
-	// to a gjson path into the Fleet host JSON (e.g. "os_version", "mdm.enrollment_status",
-	// "hardware_serial"). The setup command populates this automatically.
-	FieldMapping map[string]string `yaml:"field_mapping"`
+	// to either a bare gjson path or a {path, transform} object. The setup
+	// command populates simple-string entries automatically; transform entries
+	// must be added by hand. See FieldMappingEntry for the YAML shape.
+	FieldMapping map[string]FieldMappingEntry `yaml:"field_mapping"`
 	// PlatformFilter optionally restricts the sync to Fleet hosts whose platform
 	// matches one of these values (e.g. ["darwin", "windows"]). Empty = all.
 	PlatformFilter []string `yaml:"platform_filter"`
@@ -125,6 +126,65 @@ type CheckoutConfig struct {
 type QueryFieldMap struct {
 	Query  string `yaml:"query"`  // saved query name (resolved to ID at warm time)
 	Column string `yaml:"column"` // result column from the row Fleet returns
+}
+
+// FieldMappingEntry is the value side of sync.field_mapping. It accepts two
+// YAML shapes for backward compatibility:
+//
+//   _snipeit_fleet_host_id_1: id                # bare string → Path only
+//
+//   _snipeit_ram_2:                             # mapping → Path + Transform
+//     path: memory
+//     transform: bytes_to_gb
+//
+// Path is a gjson expression evaluated against the Fleet host JSON. Transform,
+// if set, post-processes the resolved value before it's written to Snipe-IT.
+// Supported transforms are listed in validTransforms below.
+type FieldMappingEntry struct {
+	Path      string `yaml:"path"`
+	Transform string `yaml:"transform"`
+}
+
+// UnmarshalYAML accepts either a scalar (path-only) or a mapping (path +
+// transform). Anything else is an error.
+func (e *FieldMappingEntry) UnmarshalYAML(node *yaml.Node) error {
+	switch node.Kind {
+	case yaml.ScalarNode:
+		e.Path = node.Value
+		return nil
+	case yaml.MappingNode:
+		// Decode via a type alias to avoid recursing back into this method.
+		type raw FieldMappingEntry
+		var r raw
+		if err := node.Decode(&r); err != nil {
+			return fmt.Errorf("decoding field_mapping entry: %w", err)
+		}
+		*e = FieldMappingEntry(r)
+		return nil
+	default:
+		return fmt.Errorf("field_mapping entry must be a string (path only) or a mapping with path/transform keys, got %v", node.Kind)
+	}
+}
+
+// validTransforms enumerates every transform name applyTransform knows about.
+// Keep this in lockstep with the switch in sync/engine.go.
+var validTransforms = map[string]bool{
+	"":            true, // no transform — write the raw value
+	"bytes_to_gb": true,
+	"gib_to_gb":   true,
+}
+
+// ValidTransformNames returns the supported transform names, useful for error
+// messages without exposing the validTransforms map.
+func ValidTransformNames() []string {
+	out := make([]string, 0, len(validTransforms))
+	for k := range validTransforms {
+		if k == "" {
+			continue
+		}
+		out = append(out, k)
+	}
+	return out
 }
 
 // AssetTagConfig controls how asset tags are generated for newly-created
@@ -184,7 +244,23 @@ func Load(path string) (*Config, error) {
 		cfg.Webhook.Secret = v
 	}
 
+	if err := cfg.validateFieldMappingTransforms(); err != nil {
+		return nil, err
+	}
+
 	return cfg, nil
+}
+
+// validateFieldMappingTransforms rejects unknown transform names at load time
+// so a typo is surfaced immediately rather than discovered per-host. Validation
+// runs once at startup, not in the sync hot path.
+func (c *Config) validateFieldMappingTransforms() error {
+	for col, entry := range c.Sync.FieldMapping {
+		if !validTransforms[entry.Transform] {
+			return fmt.Errorf("unknown transform %q in field_mapping[%s]: supported values are %v", entry.Transform, col, ValidTransformNames())
+		}
+	}
+	return nil
 }
 
 // Validate checks that required fields are set for a full sync.
