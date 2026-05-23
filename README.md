@@ -145,11 +145,29 @@ A single Snipe-IT field that receives an alphabetised, comma-separated list of e
 
 **Manual prereqs in Snipe-IT** (one time):
 
-1. Create a fieldset → `snipe_it.custom_fieldset_id`.
+1. Create at least one fieldset → `snipe_it.custom_fieldset_id`. Optionally create one fieldset per platform (e.g. one for macOS, one for Windows, one for mobile) and list them under `snipe_it.fieldset_ids` — `sync` will attach the right fieldset to each auto-created model based on the host's Fleet platform. `setup` associates every `Fleet: …` custom field with every configured fieldset in one idempotent pass.
 2. Create a status label for new assets → `snipe_it.default_status_id`.
 3. Create one or more model categories (e.g. per OS family) → `snipe_it.category_ids`.
 
 Manufacturers can be left blank — `sync` auto-creates them from Fleet's `hardware_vendor`.
+
+### Per-platform fieldsets
+
+Analogous to jamf2snipe's `computer_custom_fieldset_id` / `mobile_custom_fieldset_id`, but generalised across every Fleet platform:
+
+```yaml
+snipe_it:
+  custom_fieldset_id: 4           # fallback for platforms not listed below
+  fieldset_ids:
+    darwin: 5                     # MacBooks / iMacs / Mac minis
+    ios: 6                        # iPhones
+    ipados: 6                     # iPads share the iOS fieldset
+    windows: 7
+    linux: 8
+    chrome: 9
+```
+
+`setup` writes every field to all of those fieldsets. You can then prune fields that don't apply per-platform inside Snipe-IT (e.g. remove `Fleet: Disk Encryption` from the Chrome fieldset).
 
 ## Operating notes
 

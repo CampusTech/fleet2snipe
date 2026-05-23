@@ -251,9 +251,12 @@ type FieldDef struct {
 	FieldValues string // newline-separated for radio/listbox
 }
 
-// SetupFields creates/updates the listed custom fields and associates them
-// with a fieldset. Returns a map of field name -> db_column_name.
-func (c *Client) SetupFields(fieldsetID int, fields []FieldDef) (map[string]string, error) {
+// SetupFields creates/updates the listed custom fields and associates each one
+// with every fieldset in fieldsetIDs. Returns a map of field name ->
+// db_column_name. Snipe-IT fields have a single global db_column_name no matter
+// how many fieldsets reference them, so multi-fieldset support is purely an
+// additional Associate call per fieldset.
+func (c *Client) SetupFields(fieldsetIDs []int, fields []FieldDef) (map[string]string, error) {
 	if c.DryRun {
 		return nil, ErrDryRun
 	}
@@ -305,9 +308,12 @@ func (c *Client) SetupFields(fieldsetID int, fields []FieldDef) (map[string]stri
 
 		out[f.Name] = dbColumn
 
-		if fieldsetID > 0 {
-			if _, err := c.Fields.Associate(fieldID, fieldsetID); err != nil {
-				return out, fmt.Errorf("associating %q with fieldset %d: %w", f.Name, fieldsetID, err)
+		for _, fsID := range fieldsetIDs {
+			if fsID <= 0 {
+				continue
+			}
+			if _, err := c.Fields.Associate(fieldID, fsID); err != nil {
+				return out, fmt.Errorf("associating %q with fieldset %d: %w", f.Name, fsID, err)
 			}
 		}
 	}

@@ -25,8 +25,9 @@ func runSetup(cmd *cobra.Command, _ []string) error {
 	if err := Cfg.ValidateSnipeIT(); err != nil {
 		return err
 	}
-	if Cfg.SnipeIT.CustomFieldsetID == 0 {
-		return fmt.Errorf("snipe_it.custom_fieldset_id must be set in %s before running setup", ConfigFile)
+	fieldsetIDs := Cfg.SnipeIT.AllFieldsetIDs()
+	if len(fieldsetIDs) == 0 {
+		return fmt.Errorf("at least one fieldset is required: set snipe_it.custom_fieldset_id and/or snipe_it.fieldset_ids in %s before running setup", ConfigFile)
 	}
 
 	if Cfg.Sync.DryRun {
@@ -66,8 +67,8 @@ func runSetup(cmd *cobra.Command, _ []string) error {
 		{Name: "Fleet: Osquery Version", Element: "text", Format: "ANY", HelpText: "Osquery agent version"},
 	}
 
-	log.Info("creating custom fields in Snipe-IT...")
-	created, err := client.SetupFields(Cfg.SnipeIT.CustomFieldsetID, fields)
+	log.WithField("fieldsets", fieldsetIDs).Info("creating custom fields in Snipe-IT...")
+	created, err := client.SetupFields(fieldsetIDs, fields)
 	if err != nil {
 		return fmt.Errorf("setting up fields: %w", err)
 	}

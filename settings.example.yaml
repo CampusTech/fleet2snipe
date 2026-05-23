@@ -21,9 +21,24 @@ snipe_it:
   api_key: ""
   default_status_id: 2      # status assigned to newly created assets
 
-  # Snipe-IT fieldset to attach to auto-created models. Required by `setup`.
+  # Default Snipe-IT fieldset attached to auto-created models. Used when the
+  # host's platform doesn't have a more specific entry under fieldset_ids below.
   # Create one in Snipe-IT first, then put its ID here.
   custom_fieldset_id: 0
+
+  # Per-platform fieldset overrides — analogous to jamf2snipe's
+  # computer_custom_fieldset_id / mobile_custom_fieldset_id, but extended to
+  # every Fleet platform. A model created for a darwin host gets the darwin
+  # fieldset attached; an ios host gets the ios fieldset; etc. Platforms not
+  # listed here fall through to custom_fieldset_id above. `setup` associates
+  # every Fleet: custom field with every configured fieldset in one pass.
+  fieldset_ids:
+    darwin: 0
+    windows: 0
+    linux: 0
+    chrome: 0
+    ios: 0
+    ipados: 0
 
   # Optional: pre-existing manufacturer IDs keyed by Fleet's hardware_vendor
   # string (lowercased). Vendors not listed here are auto-created on sync.

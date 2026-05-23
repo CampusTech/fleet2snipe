@@ -34,10 +34,18 @@ type FleetConfig struct {
 
 // SnipeITConfig holds Snipe-IT API settings.
 type SnipeITConfig struct {
-	URL              string `yaml:"url"`
-	APIKey           string `yaml:"api_key"`
-	DefaultStatusID  int    `yaml:"default_status_id"` // status assigned to newly created assets
-	CustomFieldsetID int    `yaml:"custom_fieldset_id"`
+	URL             string `yaml:"url"`
+	APIKey          string `yaml:"api_key"`
+	DefaultStatusID int    `yaml:"default_status_id"` // status assigned to newly created assets
+	// CustomFieldsetID is the default fieldset attached to auto-created models,
+	// used when no per-platform fieldset is configured for the host's platform.
+	CustomFieldsetID int `yaml:"custom_fieldset_id"`
+	// FieldsetIDs maps a Fleet platform (e.g. "darwin", "windows", "linux",
+	// "chrome", "ios", "ipados") to a Snipe-IT fieldset ID. Falls back to
+	// CustomFieldsetID when the platform isn't mapped — matches the
+	// computer_custom_fieldset_id / mobile_custom_fieldset_id pattern in
+	// jamf2snipe but generalised to N platforms.
+	FieldsetIDs map[string]int `yaml:"fieldset_ids"`
 	// ManufacturerIDs maps a hardware_vendor string (lowercased, e.g. "apple inc.") to a
 	// Snipe-IT manufacturer ID. The sync engine ensureManufacturer falls back to
 	// auto-create when a vendor is not mapped.
@@ -190,6 +198,38 @@ func (c *SnipeITConfig) CategoryIDForPlatform(platform string) int {
 		return id
 	}
 	return c.DefaultCategoryID
+}
+
+// FieldsetIDForPlatform returns the Snipe-IT fieldset ID for a Fleet platform,
+// falling back to CustomFieldsetID. Zero is a valid "no fieldset attached".
+func (c *SnipeITConfig) FieldsetIDForPlatform(platform string) int {
+	if id, ok := c.FieldsetIDs[strings.ToLower(platform)]; ok && id != 0 {
+		return id
+	}
+	return c.CustomFieldsetID
+}
+
+// AllFieldsetIDs returns every fieldset id referenced in this config, deduped.
+// Used by `setup` to ensure each created custom field is associated with all
+// configured fieldsets in one pass.
+func (c *SnipeITConfig) AllFieldsetIDs() []int {
+	seen := make(map[int]struct{})
+	var out []int
+	add := func(id int) {
+		if id == 0 {
+			return
+		}
+		if _, ok := seen[id]; ok {
+			return
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	add(c.CustomFieldsetID)
+	for _, id := range c.FieldsetIDs {
+		add(id)
+	}
+	return out
 }
 
 // ManufacturerIDForVendor returns the Snipe-IT manufacturer ID for a Fleet

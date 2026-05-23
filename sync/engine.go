@@ -566,8 +566,8 @@ func (e *Engine) ensureModel(ctx context.Context, h fleetapi.Host, logger *logru
 	m.ModelNumber = key
 	m.Manufacturer.ID = mfgID
 	m.Category.ID = categoryID
-	if e.cfg.SnipeIT.CustomFieldsetID > 0 {
-		m.FieldsetID = e.cfg.SnipeIT.CustomFieldsetID
+	if fsID := e.cfg.SnipeIT.FieldsetIDForPlatform(h.Platform); fsID > 0 {
+		m.FieldsetID = fsID
 	}
 	if e.images != nil {
 		if img, err := e.images.ForHost(ctx, h); err != nil {
