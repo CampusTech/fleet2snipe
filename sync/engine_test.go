@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	snipeit "github.com/michellepellon/go-snipeit"
 	"github.com/sirupsen/logrus"
@@ -304,5 +305,71 @@ func TestApplyCheckoutFetchesDetailWhenUserFieldMissingFromListResponse(t *testi
 	}
 	if detailCalls == 0 {
 		t.Error("expected a fallback GET /hosts/773 detail request, got none")
+	}
+}
+
+func TestApplyCheckoutSkipsNonDeployableAsset(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Sync.DryRun = true
+	cfg.Sync.Checkout.Enabled = true
+	cfg.Sync.Checkout.UserField = "end_users.0.idp_username"
+	cfg.Sync.Checkout.MatchField = "email"
+	cfg.Sync.Checkout.Mode = "sync"
+
+	e := NewEngine(nil, nil, cfg)
+	e.usersByKey = map[string]int{"test.user@example.com": 1338}
+
+	listJSON := `{"id":756,"hardware_serial":"TESTSERIAL1","platform":"darwin","end_users":[{"idp_username":"test.user@example.com"}]}`
+	h := fleetapi.Host{ID: 756, HardwareSerial: "TESTSERIAL1", Platform: "darwin", Raw: []byte(listJSON)}
+
+	asset := snipeit.Asset{CommonFields: snipeit.CommonFields{ID: 619}}
+	asset.StatusLabel.Name = "Lost"
+	asset.StatusLabel.StatusType = "archived"
+	asset.StatusLabel.StatusMeta = "archived"
+
+	logger := logrus.NewEntry(logrus.New())
+	e.applyCheckout(context.Background(), h, asset, 0, logger)
+
+	if e.stats.CheckoutsSkipped != 1 {
+		t.Errorf("CheckoutsSkipped = %d, want 1; Snipe-IT refuses checkout of non-deployable assets, engine should skip", e.stats.CheckoutsSkipped)
+	}
+	if e.stats.CheckoutsApplied != 0 {
+		t.Errorf("CheckoutsApplied = %d, want 0", e.stats.CheckoutsApplied)
+	}
+}
+
+// Fleet reports detail_updated_at as the sentinel 2000-01-01T00:00:00Z when a
+// host's details have never been fetched. That must not be treated as a real
+// timestamp, or the freshness check concludes "snipe is newer" and skips every
+// update for the host forever.
+func TestUpdateIgnoresFleetNeverSentinel(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Sync.DryRun = true
+	cfg.Sync.SetName = true
+
+	e := NewEngine(nil, nil, cfg)
+
+	h := fleetapi.Host{
+		ID:              819,
+		HardwareSerial:  "TESTSERIAL2",
+		Platform:        "darwin",
+		ComputerName:    "Test-Host",
+		DetailUpdatedAt: time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC),
+		Raw:             []byte(`{"id":819,"hardware_serial":"TESTSERIAL2"}`),
+	}
+
+	existing := snipeit.Asset{CommonFields: snipeit.CommonFields{
+		ID:        959,
+		Name:      "Old-Name",
+		UpdatedAt: &snipeit.SnipeTime{Time: time.Date(2026, 7, 14, 10, 23, 59, 0, time.UTC)},
+	}}
+
+	logger := logrus.NewEntry(logrus.New())
+	if err := e.update(context.Background(), h, existing, logger); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+
+	if e.stats.Updated != 1 {
+		t.Errorf("Updated = %d (Skipped = %d), want 1; sentinel detail_updated_at must bypass the freshness check", e.stats.Updated, e.stats.Skipped)
 	}
 }

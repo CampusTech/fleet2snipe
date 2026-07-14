@@ -10,6 +10,11 @@ import (
 	"time"
 )
 
+// NeverTimestamp is Fleet's sentinel for timestamps that have never been set
+// (fleet.NeverTimestamp upstream). Fleet reports it, e.g., as detail_updated_at
+// for hosts whose details have never been fetched.
+var NeverTimestamp = time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+
 // Host is the subset of fields fleet2snipe consumes from /api/v1/fleet/hosts.
 // Fields appear in both the list and detail responses unless noted otherwise.
 // Unknown fields decode silently; gjson is used on the raw bytes for anything
@@ -57,6 +62,12 @@ type Host struct {
 	// custom field_mapping paths via gjson against this — keeps the Host struct
 	// stable while still allowing arbitrary mappings.
 	Raw json.RawMessage `json:"-"`
+}
+
+// DetailsFetched reports whether Fleet has ever refreshed this host's details.
+// False when detail_updated_at is missing or is Fleet's NeverTimestamp sentinel.
+func (h Host) DetailsFetched() bool {
+	return !h.DetailUpdatedAt.IsZero() && !h.DetailUpdatedAt.Equal(NeverTimestamp)
 }
 
 // MDM is Fleet's mdm sub-object.

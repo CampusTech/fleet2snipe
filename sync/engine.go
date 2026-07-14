@@ -357,8 +357,9 @@ func (e *Engine) create(ctx context.Context, h fleetapi.Host, logger *logrus.Ent
 // update PATCHes an existing asset with any changed fields.
 func (e *Engine) update(ctx context.Context, h fleetapi.Host, existing snipeit.Asset, logger *logrus.Entry) error {
 	// Freshness check (Fleet's detail_updated_at vs Snipe's updated_at). Skip
-	// when --force is set or when the host has never reported in.
-	if !e.cfg.Sync.Force && !h.DetailUpdatedAt.IsZero() && existing.UpdatedAt != nil {
+	// when --force is set or when the host's details were never fetched (Fleet
+	// reports its NeverTimestamp sentinel then, not a zero time).
+	if !e.cfg.Sync.Force && h.DetailsFetched() && existing.UpdatedAt != nil {
 		snipeUpdated := existing.UpdatedAt.Time
 		if !snipeUpdated.IsZero() && h.DetailUpdatedAt.Before(snipeUpdated) {
 			logger.WithFields(logrus.Fields{
@@ -489,6 +490,21 @@ func (e *Engine) applyCheckout(ctx context.Context, h fleetapi.Host, asset snipe
 		return
 	}
 
+	// Snipe-IT refuses to check out assets whose status label isn't
+	// deployable ("That asset is not available for checkout!"). Skip with a
+	// clear message instead — typically an asset marked Lost/Archived whose
+	// device is nonetheless still reporting to Fleet.
+	if !statusDeployable(asset.StatusLabel) {
+		logger.WithFields(logrus.Fields{
+			"snipe_id":    asset.ID,
+			"status":      asset.StatusLabel.Name,
+			"status_type": asset.StatusLabel.StatusType,
+			"user_key":    rawKey,
+		}).Warn("asset status is not deployable; skipping checkout — host still reports to Fleet, so the Snipe-IT status may be stale")
+		e.stats.CheckoutsSkipped++
+		return
+	}
+
 	if e.cfg.Sync.DryRun {
 		logger.WithFields(logrus.Fields{"snipe_id": asset.ID, "user_id": desiredID, "user_key": rawKey}).Info("[DRY RUN] would check out asset")
 		e.stats.CheckoutsApplied++
@@ -512,6 +528,21 @@ func (e *Engine) applyCheckout(ctx context.Context, h fleetapi.Host, asset snipe
 	}
 	logger.WithFields(logrus.Fields{"snipe_id": asset.ID, "user_id": desiredID, "user_key": rawKey}).Info("checked out asset to user")
 	e.stats.CheckoutsApplied++
+}
+
+// statusDeployable reports whether a status label allows checkout. Archived,
+// pending, and undeployable labels are rejected by Snipe-IT's checkout
+// endpoint. "deployed" (currently assigned) still passes: reassignment checks
+// the asset in first. Unknown/empty types pass so we don't skip on partial
+// API responses — worst case Snipe-IT rejects the checkout as before.
+func statusDeployable(s snipeit.StatusLabel) bool {
+	for _, v := range []string{s.StatusType, s.StatusMeta} {
+		switch strings.ToLower(v) {
+		case "archived", "pending", "undeployable":
+			return false
+		}
+	}
+	return true
 }
 
 // extractCheckoutKey evaluates a gjson path against the host's raw JSON.
