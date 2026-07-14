@@ -102,6 +102,24 @@ func (c *Client) CreateModel(ctx context.Context, m snipeit.Model) (*snipeit.Mod
 	return &resp.Payload, nil
 }
 
+// PatchModelFieldset attaches a fieldset to an existing model. Uses PATCH so
+// only fieldset_id is sent — Snipe-IT re-validates whatever a full update
+// carries, which breaks on models with pre-existing validation conflicts.
+func (c *Client) PatchModelFieldset(ctx context.Context, modelID, fieldsetID int) error {
+	if c.DryRun {
+		return ErrDryRun
+	}
+	m := snipeit.Model{FieldsetID: fieldsetID}
+	resp, _, err := c.Models.PatchContext(ctx, modelID, m)
+	if err != nil {
+		return fmt.Errorf("attaching fieldset %d to model %d: %w", fieldsetID, modelID, err)
+	}
+	if resp.Status != "success" {
+		return fmt.Errorf("attaching fieldset %d to model %d: %s", fieldsetID, modelID, resp.Message)
+	}
+	return nil
+}
+
 // ListAllUsers pages through every Snipe-IT user.
 func (c *Client) ListAllUsers(ctx context.Context) ([]snipeit.User, error) {
 	var all []snipeit.User

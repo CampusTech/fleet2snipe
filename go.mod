@@ -19,4 +19,4 @@ require (
 	golang.org/x/sys v0.29.0 // indirect
 )
 
-replace github.com/michellepellon/go-snipeit => github.com/CampusTech/go-snipeit v0.0.0-20260714150542-f72b6d9f0a97
+replace github.com/michellepellon/go-snipeit => github.com/CampusTech/go-snipeit v0.0.0-20260714160118-76ff19246342

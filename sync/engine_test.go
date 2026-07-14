@@ -2,6 +2,7 @@ package sync
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/CampusTech/fleet2snipe/config"
 	"github.com/CampusTech/fleet2snipe/fleetapi"
+	"github.com/CampusTech/fleet2snipe/snipe"
 )
 
 func TestTransformValue(t *testing.T) {
@@ -371,5 +373,61 @@ func TestUpdateIgnoresFleetNeverSentinel(t *testing.T) {
 
 	if e.stats.Updated != 1 {
 		t.Errorf("Updated = %d (Skipped = %d), want 1; sentinel detail_updated_at must bypass the freshness check", e.stats.Updated, e.stats.Skipped)
+	}
+}
+
+// Models created by other tools (or by hand) often lack a fieldset, and
+// Snipe-IT then rejects every custom field on their assets. When the engine
+// reuses such a model it should attach the configured fieldset — once.
+func TestEnsureModelAttachesMissingFieldset(t *testing.T) {
+	patches := 0
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/models/44" || r.Method != http.MethodPatch {
+			t.Errorf("unexpected snipe request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		patches++
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		_, _ = fmt.Fprint(w, `{"status": "success", "payload": {"id": 44, "name": "TS140"}}`)
+	}))
+	defer srv.Close()
+
+	sc, err := snipe.NewClient(srv.URL, "test-token", false)
+	if err != nil {
+		t.Fatalf("snipe.NewClient: %v", err)
+	}
+
+	cfg := &config.Config{}
+	cfg.SnipeIT.CustomFieldsetID = 1
+
+	e := NewEngine(nil, sc, cfg)
+	e.models["TS140"] = 44
+	e.modelsMissingFieldset = map[int]bool{44: true}
+
+	h := fleetapi.Host{ID: 1, HardwareModel: "TS140", Platform: "windows"}
+	logger := logrus.NewEntry(logrus.New())
+
+	id, err := e.ensureModel(context.Background(), h, logger)
+	if err != nil {
+		t.Fatalf("ensureModel: %v", err)
+	}
+	if id != 44 {
+		t.Errorf("ensureModel id = %d, want 44", id)
+	}
+	if patches != 1 {
+		t.Fatalf("model PATCH calls = %d, want 1", patches)
+	}
+	if got := body["fieldset_id"]; got != float64(1) {
+		t.Errorf("PATCH body fieldset_id = %v, want 1", got)
+	}
+
+	// Second host with the same model must not re-patch.
+	if _, err := e.ensureModel(context.Background(), h, logger); err != nil {
+		t.Fatalf("ensureModel (second): %v", err)
+	}
+	if patches != 1 {
+		t.Errorf("model PATCH calls after second host = %d, want still 1", patches)
 	}
 }

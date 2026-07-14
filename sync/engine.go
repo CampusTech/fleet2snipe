@@ -73,6 +73,12 @@ type Engine struct {
 	manufacturers map[string]int  // hardware_vendor (lowercased) -> snipe manufacturer ID
 	stats         Stats
 
+	// modelsMissingFieldset tracks pre-existing models that have no fieldset
+	// (typically created by other tools or by hand). Snipe-IT rejects every
+	// custom field on such models' assets, so ensureModel attaches the
+	// configured fieldset the first time each model is used in a run.
+	modelsMissingFieldset map[int]bool
+
 	// queryIDByName resolves saved query names to their Fleet IDs. Populated
 	// during Warm from the union of global + per-platform query mappings.
 	queryIDByName map[string]uint
@@ -90,13 +96,14 @@ type Engine struct {
 // will be supplied directly (e.g. tests or webhook payload-only flows).
 func NewEngine(f *fleetapi.Client, s *snipe.Client, cfg *config.Config) *Engine {
 	return &Engine{
-		fleet:         f,
-		snipe:         s,
-		cfg:           cfg,
-		models:        make(map[string]int),
-		manufacturers: make(map[string]int),
-		queryIDByName: make(map[string]uint),
-		queryRows:     make(map[uint]map[uint]map[string]string),
+		fleet:                 f,
+		snipe:                 s,
+		cfg:                   cfg,
+		models:                make(map[string]int),
+		manufacturers:         make(map[string]int),
+		modelsMissingFieldset: make(map[int]bool),
+		queryIDByName:         make(map[string]uint),
+		queryRows:             make(map[uint]map[uint]map[string]string),
 	}
 }
 
@@ -123,6 +130,9 @@ func (e *Engine) Warm(ctx context.Context) error {
 		}
 		if m.Name != "" && e.models[m.Name] == 0 {
 			e.models[m.Name] = m.ID
+		}
+		if m.Fieldset == nil {
+			e.modelsMissingFieldset[m.ID] = true
 		}
 	}
 	log.WithField("count", len(models)).Info("loaded snipe-it models")
@@ -1070,6 +1080,7 @@ func (e *Engine) ensureModel(ctx context.Context, h fleetapi.Host, logger *logru
 		return 0, nil
 	}
 	if id, ok := e.models[key]; ok {
+		e.healModelFieldset(ctx, id, h, logger)
 		return id, nil
 	}
 
@@ -1119,6 +1130,32 @@ func (e *Engine) ensureModel(ctx context.Context, h fleetapi.Host, logger *logru
 	e.stats.ModelsCreated++
 	logger.WithFields(logrus.Fields{"model": key, "snipe_model_id": created.ID}).Info("created snipe-it model")
 	return created.ID, nil
+}
+
+// healModelFieldset attaches the configured fieldset to a pre-existing model
+// that has none, so Snipe-IT stops rejecting custom fields on its assets.
+// One attempt per model per run, success or not — a persistent failure (e.g.
+// a name-uniqueness conflict on a duplicate model) would otherwise repeat for
+// every host of that model.
+func (e *Engine) healModelFieldset(ctx context.Context, modelID int, h fleetapi.Host, logger *logrus.Entry) {
+	if modelID <= 0 || !e.modelsMissingFieldset[modelID] {
+		return
+	}
+	fsID := e.cfg.SnipeIT.FieldsetIDForPlatform(h.Platform)
+	if fsID <= 0 {
+		return
+	}
+	delete(e.modelsMissingFieldset, modelID)
+
+	if e.cfg.Sync.DryRun {
+		logger.WithFields(logrus.Fields{"model_id": modelID, "fieldset_id": fsID}).Info("[DRY RUN] would attach fieldset to model")
+		return
+	}
+	if err := e.snipe.PatchModelFieldset(ctx, modelID, fsID); err != nil {
+		logger.WithError(err).WithFields(logrus.Fields{"model_id": modelID, "fieldset_id": fsID}).Warn("could not attach fieldset to model; its assets' custom fields will be rejected")
+		return
+	}
+	logger.WithFields(logrus.Fields{"model_id": modelID, "fieldset_id": fsID}).Info("attached fieldset to model")
 }
 
 // ensureManufacturer returns a manufacturer ID for the host's vendor, creating
