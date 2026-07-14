@@ -444,6 +444,19 @@ func (e *Engine) applyCheckout(ctx context.Context, h fleetapi.Host, asset snipe
 	}
 
 	rawKey := extractCheckoutKey(h.Raw, e.cfg.Sync.Checkout.UserField)
+	if rawKey == "" && e.fleet != nil && h.ID != 0 {
+		// The list endpoint omits detail-only fields like end_users (IdP
+		// mapping), so a miss against list-shaped Raw isn't conclusive —
+		// retry against the full host detail.
+		logger.WithField("user_field", e.cfg.Sync.Checkout.UserField).Debug("user field missing from host JSON; fetching host detail")
+		detail, err := e.fleet.GetHost(ctx, h.ID)
+		if err != nil {
+			logger.WithError(err).Warn("could not fetch host detail for checkout; leaving checkout untouched")
+			e.stats.CheckoutsSkipped++
+			return
+		}
+		rawKey = extractCheckoutKey(detail.Raw, e.cfg.Sync.Checkout.UserField)
+	}
 	if rawKey == "" {
 		logger.Debug("no user identifier on host; leaving checkout untouched")
 		e.stats.CheckoutsSkipped++

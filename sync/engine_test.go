@@ -1,8 +1,14 @@
 package sync
 
 import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
+	snipeit "github.com/michellepellon/go-snipeit"
+	"github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 
 	"github.com/CampusTech/fleet2snipe/config"
@@ -77,7 +83,7 @@ func TestTransformValue(t *testing.T) {
 		{"base64_to_mac real macOS sample", `{"v": "cIzyxNK1"}`, "base64_to_mac", "70:8c:f2:c4:d2:b5"},
 		{"base64_to_mac all zeros", `{"v": "AAAAAAAA"}`, "base64_to_mac", "00:00:00:00:00:00"},
 		{"base64_to_mac empty", `{"v": ""}`, "base64_to_mac", ""},
-		{"base64_to_mac too few bytes", `{"v": "AAAA"}`, "base64_to_mac", ""}, // 3 bytes
+		{"base64_to_mac too few bytes", `{"v": "AAAA"}`, "base64_to_mac", ""},          // 3 bytes
 		{"base64_to_mac too many bytes", `{"v": "AAAAAAAAAAAA"}`, "base64_to_mac", ""}, // 9 bytes
 		{"base64_to_mac not base64", `{"v": "not!base64@@"}`, "base64_to_mac", ""},
 		{"base64_to_mac missing", `{"x": "cIzyxNK1"}`, "base64_to_mac", ""},
@@ -251,5 +257,52 @@ func TestAssetTagResolution(t *testing.T) {
 				t.Errorf("assetTag = %q, want %q", got, c.want)
 			}
 		})
+	}
+}
+
+// Reproduces: batch sync builds Host.Raw from the list endpoint, which never
+// includes end_users (IdP mapping) — that only appears in the host detail
+// response. With checkout configured on end_users.0.idp_username, the engine
+// must fall back to fetching the host detail instead of skipping checkout.
+func TestApplyCheckoutFetchesDetailWhenUserFieldMissingFromListResponse(t *testing.T) {
+	detailCalls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/fleet/hosts/773" {
+			t.Errorf("unexpected fleet request: %s", r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		detailCalls++
+		_, _ = fmt.Fprint(w, `{"host":{"id":773,"hardware_serial":"FJPVJPGQTJ","platform":"darwin","end_users":[{"idp_username":"clare.ostroski@campus.edu","idp_full_name":"Clare Ostroski"}]}}`)
+	}))
+	defer srv.Close()
+
+	fc, err := fleetapi.NewClient(srv.URL, "test-token", false)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	cfg := &config.Config{}
+	cfg.Sync.DryRun = true // dry-run counts the checkout without needing Snipe-IT
+	cfg.Sync.Checkout.Enabled = true
+	cfg.Sync.Checkout.UserField = "end_users.0.idp_username"
+	cfg.Sync.Checkout.MatchField = "email"
+	cfg.Sync.Checkout.Mode = "sync"
+
+	e := NewEngine(fc, nil, cfg)
+	e.usersByKey = map[string]int{"clare.ostroski@campus.edu": 42}
+
+	// Host as it arrives from GET /api/v1/fleet/hosts — no end_users key.
+	listJSON := `{"id":773,"hardware_serial":"FJPVJPGQTJ","platform":"darwin","computer_name":"Neo-FJPVJP"}`
+	h := fleetapi.Host{ID: 773, HardwareSerial: "FJPVJPGQTJ", Platform: "darwin", Raw: []byte(listJSON)}
+
+	logger := logrus.NewEntry(logrus.New())
+	e.applyCheckout(context.Background(), h, snipeit.Asset{CommonFields: snipeit.CommonFields{ID: 1452}}, 0, logger)
+
+	if e.stats.CheckoutsApplied != 1 {
+		t.Errorf("CheckoutsApplied = %d, want 1 (skipped=%d); engine should fetch host detail for end_users", e.stats.CheckoutsApplied, e.stats.CheckoutsSkipped)
+	}
+	if detailCalls == 0 {
+		t.Error("expected a fallback GET /hosts/773 detail request, got none")
 	}
 }
