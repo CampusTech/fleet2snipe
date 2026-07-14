@@ -153,9 +153,12 @@ func (c *Client) CheckinAsset(ctx context.Context, assetID int) error {
 		return fmt.Errorf("checking in asset %d: %w", assetID, err)
 	}
 	if resp.Status != "success" {
-		// "That asset is not checked out to anyone, please use the request endpoint"
-		// is fine — we wanted it unassigned and it already is.
-		if strings.Contains(strings.ToLower(string(resp.Message)), "not checked out") {
+		// Soft errors meaning "the asset is already unassigned" are fine — we
+		// wanted it unassigned and it already is. Snipe-IT has used both
+		// "That asset is already checked in." and "...is not checked out..."
+		// wordings for this case.
+		msg := strings.ToLower(resp.Message.String())
+		if strings.Contains(msg, "not checked out") || strings.Contains(msg, "already checked in") {
 			return nil
 		}
 		return fmt.Errorf("checking in asset %d: %s", assetID, resp.Message)
@@ -248,14 +251,18 @@ func (c *Client) PatchAsset(ctx context.Context, id int, a snipeit.Asset) (*snip
 
 	rejected, reason := invalidFieldErrors(string(resp.Message))
 	if len(rejected) > 0 && a.CustomFields != nil {
-		log.WithFields(logrus.Fields{
-			"asset_id":    id,
-			"model_id":    a.Model.ID,
-			"model_name":  a.Model.Name,
-			"fieldset_id": a.Model.FieldsetID,
-			"fields":      rejected,
-			"reason":      reason,
-		}).Warn("Snipe-IT rejected custom fields — retrying without them. Run 'fleet2snipe setup' to fix the fieldset.")
+		warnFields := logrus.Fields{
+			"asset_id": id,
+			"fields":   rejected,
+			"reason":   reason,
+		}
+		// The patch itself rarely carries the model, so fetch the asset to
+		// name the model whose fieldset needs fixing.
+		if got, _, err := c.Assets.GetContext(ctx, id); err == nil {
+			warnFields["model_id"] = got.Model.ID
+			warnFields["model_name"] = got.Model.Name
+		}
+		log.WithFields(warnFields).Warn("Snipe-IT rejected custom fields — retrying without them. Run 'fleet2snipe setup' to fix the fieldset.")
 		cleaned := make(map[string]string, len(a.CustomFields))
 		for k, v := range a.CustomFields {
 			cleaned[k] = v
